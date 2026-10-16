@@ -20,6 +20,7 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
+#import "dm_webdav.h"
 #endif
 #import <Network/Network.h>
 #include <signal.h>
@@ -124,6 +125,9 @@ static void on_commit(const char *commit_dir) {
 // 出局 / 切后台：把局内攒下的最新一份传掉。切后台用系统给的后台收尾时间，传完才结束（最多约 30 秒，系统到点前会叫停）
 // Leaving a run / going to background: upload the newest copy accumulated during the run. Going to background uses the background completion time granted by the system and ends only after the upload finishes (about 30 seconds at most; the system calls a stop before time is up)
 void dm_cloud_flush(int background) {
+#if TARGET_OS_IPHONE
+    if (dm_webdav_active()) { dm_webdav_flush(background); return; }
+#endif
     if (!g_q) return;   // 没开同步（测试存档 / 没登录 iCloud / 自定义页关了） | Sync not enabled (test save / not signed in to iCloud / turned off on the Custom page)
     if (background) atomic_store(&g_bg, 1);
 #if TARGET_OS_IPHONE
@@ -142,13 +146,20 @@ void dm_cloud_flush(int background) {
 // 退出 App 前（Mac）：把局内攒下的最新一份传掉，并等队列里的活做完，最多 sec 秒。返回 1 = 做完了（或本来就没开同步），0 = 到点还没完
 // Before quitting the App (Mac): upload the latest copy accumulated during the game and wait for the queued work to finish, at most sec seconds. Returns 1 = done (or sync was not on in the first place), 0 = not finished in time
 int dm_cloud_flush_wait(double sec) {
+#if TARGET_OS_IPHONE
+    if (dm_webdav_active()) return dm_webdav_flush_wait(sec);
+#endif
     if (!g_q) return 1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(g_q, ^{ NSString *p = g_pend; g_pend = nil; if (p) upload_snap(p, "退出 App 前，"); else LOG("iCloud 同步：退出 App 前，没有待传的存档"); dispatch_semaphore_signal(done); });
     if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec * NSEC_PER_SEC)))) { LOG("【红】iCloud 同步：退出 App 前 %.0f 秒没传完（没传完的下次启动补传）", sec); return 0; }
     return 1;
 }
-void dm_cloud_foreground(void) { atomic_store(&g_bg, 0); }
+void dm_cloud_foreground(void) {
+#if TARGET_OS_IPHONE
+    if (dm_webdav_active()) dm_webdav_foreground();
+#endif
+    atomic_store(&g_bg, 0); }
 static void cloud_ingame(int on) { if (on) atomic_store(&g_session, 1); }
 static void cloud_charsel(void) { if (atomic_exchange(&g_session, 0)) dm_cloud_flush(0); }   // 退出这一局回到前端（主菜单 / 选角页）：这一局结束 | Left this run back to the front end (main menu / character select page): this run has ended
 
@@ -287,6 +298,9 @@ void dm_cloud_boot(void) {
         if (!(r1 && !strcmp(r1, "1") && r2 && !strcmp(r2, "写入真实云端"))) { LOG("iCloud 同步：Mac 上运行：缺省不同步 iCloud"); return; }
         LOG("【红】iCloud 同步：Mac 上运行，已显式放开（DM_REAL_ICLOUD）：本局连真实云端"); }
     if (off) { LOG("iCloud 同步：测试开关 DM_TEST_ICLOUD_OFF，本局不同步"); return; }
+#if TARGET_OS_IPHONE
+    if (real && dm_webdav_boot(sv)) return;
+#endif
     if (!dm_custom_get("icloud")) { LOG("iCloud 同步：自定义页已关，不同步"); return; }
     double t0 = CFAbsoluteTimeGetCurrent(), limit = 5.0;
     if (ldir) g_cloud = test_path(ldir);                             // 测试：本地目录当云端（没有 iCloud 权限的开发包也能验整条链） | Test: use a local directory as the cloud (a dev build without iCloud entitlement can also verify the whole chain)

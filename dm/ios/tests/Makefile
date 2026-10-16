@@ -13,6 +13,11 @@ fixture_test = $(if $(HAVE_BINDING_FIXTURES),./$(1) $(BINDING_FIXTURES),@echo "�
 .PHONY: all run test clean
 all: $(TARGET) $(BINDING_TARGETS) t_native_art t_skill_aim t_joy_travel $(METAL_CACHE_TARGET)
 run: test
+.PHONY: test-webdav
+# 真实 HTTP 集成测试需要本机 Postman CLI，不依赖游戏文件。
+# Real-HTTP integration tests require the local Postman CLI, without game files.
+test-webdav:
+	python3 test_webdav_sync.py
 $(TARGET): t_touch_controls.c $(wildcard ../Sources/dm_touch_controls.[ch]) ../../host/dm_input.h
 	$(CC) $(CFLAGS) -I../Sources t_touch_controls.c ../Sources/dm_touch_controls.c -lm -o $@
 t_native_binding: t_native_binding.c ../Sources/dm_touch_game_state.c ../Sources/dm_touch_game_state.h ../Sources/dm_touch_controls.c ../Sources/dm_touch_controls.h

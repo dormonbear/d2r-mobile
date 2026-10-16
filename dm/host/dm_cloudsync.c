@@ -59,6 +59,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include "dm.h"
+#include "dm_cloudpack.h"
 
 #define MAXF 64
 typedef struct { char path[256]; uint64_t mt; uint32_t size; uint8_t *data; } cs_file;   // path：相对存档目录 | path: relative to the save directory
@@ -328,8 +329,40 @@ int dm_cloud_bak_pack(const char *bak, const char *unit, const char *pack, const
     cs_unit *u = calloc(1, sizeof *u); int r = u && pack_read(pack, u) == 1 ? (u->tomb ? 0 : backup_copy(bak, unit, u, why)) : -1; if (u) { unit_free(u); free(u); } return r; }
 void dm_cloud_char_conflict_note(const char *unit) { char_conf_add(unit); }
 
-// 返回本次动作数（上传 + 下载 + 删除），-1 = 参数错。ready(单位) 返回 0 = 云端那份还没下载好（iCloud 占位），这一单位本次跳过。now_ms = 写删除标记用的时刻
-// Returns the number of actions this time (uploads + downloads + deletions), -1 = bad arguments. ready(unit) returning 0 = the cloud copy has not finished downloading yet (iCloud placeholder), and this unit is skipped this time. now_ms = the timestamp used when writing a deletion marker
+// 显式导入只接受该单位自己的路径，防止服务器上的包改写其他角色或设置。
+// Explicit import accepts only paths owned by the named unit, preventing a server pack from overwriting other characters or settings.
+static int pack_owns_paths(const cs_unit *u, const char *unit) {
+    if (!unit || !*unit || strlen(unit) >= 64 || strstr(unit, "..") || strchr(unit, '/') || strchr(unit, '\\') || (unit[0] == '_' && strcmp(unit, "_stash")) || unit[0] == '.') return 0;
+    int character = 0, ntop = 0; char tops[16][256];
+    for (int i = 0; i < u->n; i++) {
+        const char *p = u->f[i].path; const char *slash = strchr(p, '/'); size_t n = slash ? (size_t)(slash - p) : strlen(p);
+        if (!n || strchr(p, '\\') || strstr(p, "//") || (slash && strchr(slash + 1, '/'))) return 0;
+        int found = 0; for (int j = 0; j < ntop; j++) found |= strlen(tops[j]) == n && !strncmp(tops[j], p, n);
+        if (!found) { if (ntop == 16 || n >= sizeof tops[0]) return 0; memcpy(tops[ntop], p, n); tops[ntop++][n] = 0; }
+        if (!strcmp(unit, "_stash")) { char top[256]; if (n >= sizeof top) return 0; memcpy(top, p, n); top[n] = 0; if (!is_stash(top)) return 0; }
+        else { if (!slash || n != strlen(unit) || strncmp(p, unit, n)) return 0;
+            char expected[140]; snprintf(expected, sizeof expected, "%s/%s.d2s", unit, unit); if (!strcmp(p, expected)) character = 1; }
+        for (int j = 0; j < i; j++) if (!strcmp(p, u->f[j].path)) return 0;
+    }
+    return u->tomb ? u->n == 0 : u->n > 0 && (!strcmp(unit, "_stash") || character);
+}
+int dm_cloud_pack_validate(const char *pack, const char *unit) {
+    cs_unit *u = calloc(1, sizeof *u); if (!u) return 0;
+    int ok = pack_read(pack, u) == 1 && pack_owns_paths(u, unit); unit_free(u); free(u); return ok;
+}
+int dm_cloud_pack_apply(const char *save, const char *bak, const char *unit, const char *pack) {
+    cs_unit *c = calloc(1, sizeof *c), *l = calloc(1, sizeof *l); int r = -1;
+    if (!c || !l) goto done;
+    if (pack_read(pack, c) != 1 || !pack_owns_paths(c, unit)) goto done;
+    int hl = local_read(save, unit, l); if (hl < 0) goto done;
+    if ((!hl && c->tomb) || (hl && !c->tomb && l->hash == c->hash)) { r = 0; goto done; }
+    if (c->tomb) { char d[1300]; r = move_to_bak(save, bak, unit, l, "WebDAV", d, sizeof d); }
+    else r = local_apply(save, bak, unit, hl ? l : NULL, c);
+done:
+    if (c) { unit_free(c); free(c); } if (l) { unit_free(l); free(l); } return r;
+}
+// 返回本次动作数（上传 + 下载 + 删除），-1 = 参数错。ready(单位) 返回 0 时跳过，now_ms 用于删除标记。
+// Return the number of actions (uploads + downloads + deletions), or -1 for bad arguments. Skip units for which ready returns 0; now_ms timestamps tombstones.
 int dm_cloud_sync(const char *save, const char *cloud, const char *bak, const char *statef, int allow_down, uint64_t now_ms, int (*ready)(const char *unit)) {
     if (!save || !cloud || !bak || !statef) return -1;
     static char names[256][64]; int nn = 0; static cs_state st[256]; int ns = state_load(statef, st, 256), acts = 0;

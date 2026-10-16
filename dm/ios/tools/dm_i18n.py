@@ -83,11 +83,24 @@ def header():
     out += ['    { %s, %s, %s },' % (c(k), c(zh), c(en)) for k, zh, en in rows()]
     return '\n'.join(out + ['};', ''])
 
+def privacy_strings():
+    """系统权限文案也从同一张中英表生成。 | Generate system permission copy from the same bilingual table."""
+    row = next(r for r in rows() if r[0] == 'dmDAVLocalNetwork')
+    return {lang: '/* 由 ui_text.tsv 生成 | Generated from ui_text.tsv */\n"NSLocalNetworkUsageDescription" = %s;\n' % json.dumps(row[column], ensure_ascii=False)
+            for lang, column in [('en', 2), ('zh-Hans', 1), ('zh-Hant', 1)]}
+
 if __name__ == '__main__':
     import sys
     if sys.argv[1:] == ['--header']: sys.stdout.write(header())
+    elif sys.argv[1:] == ['--privacy']:
+        for language, text in privacy_strings().items():
+            folder = os.path.join(HERE, '..', 'Sources', language + '.lproj'); os.makedirs(folder, exist_ok=True)
+            open(os.path.join(folder, 'InfoPlist.strings'), 'w', encoding='utf-8').write(text)
     elif sys.argv[1:] == ['--check']:   # 单测：表与入库的头文件一致 | unit test: the table matches the checked-in header file
         h = os.path.join(HERE, '..', '..', 'host', 'dm_i18n_tab.h')
         if open(h, encoding='utf-8').read() != header(): raise SystemExit('dm_i18n：dm/host/dm_i18n_tab.h 过期，重跑 python3 dm/ios/tools/dm_i18n.py --header > dm/host/dm_i18n_tab.h')
+        for language, text in privacy_strings().items():
+            path = os.path.join(HERE, '..', 'Sources', language + '.lproj', 'InfoPlist.strings')
+            if not os.path.isfile(path) or open(path, encoding='utf-8').read() != text: raise SystemExit('dm_i18n: run python3 dm/ios/tools/dm_i18n.py --privacy')
         print('dm_i18n OK %d 条' % len(rows()))
-    else: raise SystemExit('用法：dm_i18n.py --header | --check')
+    else: raise SystemExit('用法：dm_i18n.py --header | --privacy | --check')

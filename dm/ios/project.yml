@@ -53,11 +53,14 @@ targets:
       - path: Gen/main/main.c
         compilerFlags: "-Dmain=dm_main"
     info:
+      # 系统权限文案通过 Gen/dm.xcconfig 与 InfoPlist.strings 从中英表生成。
+      # System permission copy is generated from the bilingual table through Gen/dm.xcconfig and InfoPlist.strings.
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: D2R Mobile
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)         # 构建号（testflight.sh 传月日时分）；xcodegen 缺省写死 1，TestFlight 会当重复构建 | Build number (testflight.sh passes month-day-hour-minute); xcodegen hardcodes 1 by default, which TestFlight treats as a duplicate build
         CFBundleShortVersionString: $(MARKETING_VERSION)
+        NSLocalNetworkUsageDescription: $(DM_LOCAL_NETWORK_USAGE)
         SWUpdateURL: $(DM_UPDATE_URL)                       # 新版本提示查的版本文件地址（Sources/dm_update.m）；出包脚本传，地址不进仓库。空 = 不查不提示 | URL of the version file checked for the new-version prompt (Sources/dm_update.m); passed by the packaging script, the URL is not committed to the repository. Empty = no check, no prompt
         UILaunchStoryboardName: ""
         UIFileSharingEnabled: true
@@ -95,6 +98,7 @@ targets:
       - target: RomfsDownloader      # 苹果托管资源包要求的下载扩展（系统缺省实现） | Download extension required by Apple-hosted asset packs (system default implementation)
       - sdk: BackgroundAssets.framework
       - sdk: Network.framework             # iCloud 首次同步看网络通不通（cloud_ios.m first_listing_ok） | iCloud first sync checks whether the network is reachable (cloud_ios.m first_listing_ok)
+      - sdk: Security.framework            # WebDAV 凭据只存钥匙串 | WebDAV credentials are stored only in Keychain
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: ${DM_BUNDLE_ID}
       ENABLE_USER_SCRIPT_SANDBOXING: NO              # 构建前脚本「从游戏文件生成资源」要读工程外的 RomFS（沙盒里读不到） | The pre-build script 「从游戏文件生成资源」(Generate assets from game files) needs to read the RomFS outside the project (unreadable inside the sandbox)

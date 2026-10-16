@@ -63,7 +63,7 @@ dmBlissTitle	极乐世界	Elysium	建角页「极乐世界」勾选标题（touc
 dmBlissDesc	暗金 ×5、套装 ×3、符文 ×5；Boss 永远按首次击败掉落。	Unique ×5, Set ×3, Runes ×5; bosses always drop as on first kill.	建角页「极乐世界」说明
 dmRwHint	先移到个人仓库或背包	Move out of shared stash first	符文之语清单：底材在共享仓库时的灰字
 dmRwGo	一键合成	Craft	符文之语清单每行 / 详情页的合成按钮
-dmPauseShareLog	分享诊断日志	Share Diagnostics	暂停菜单按钮
+dmPauseShareLog	存档与诊断	Saves & Diagnostics	暂停菜单工具入口
 dmCustomAutoMana	自动喝药（生命 <50%、法力 <30%）	Auto-drink (Life 50%, Mana 30%)	自定义页开关（touch_layout.py _CUSTOM_ROWS；中英行数必须相同）
 dmCustomMercPot	佣兵自动喂药（生命 <50%，多耗药）	Auto-feed Merc at Life <50%	自定义页开关
 dmCustomDropLight	高价值掉落光柱	Light beam on valuable drops	自定义页开关
@@ -370,3 +370,36 @@ dmTcNavBack	返回	Back	同上
 dmTcNavAction	操作	Action	同上
 dmTcNavBind	绑定	Bind	同上
 dmTcNavNext	下一页	Next Page	同上
+dmDAVTitle	WebDAV 存档同步	WebDAV Save Sync	WebDAV 存档同步设置
+dmDAVEnable	启用 WebDAV 同步	Enable WebDAV sync	WebDAV 存档同步设置
+dmDAVURL	HTTPS WebDAV 文件夹地址	HTTPS WebDAV folder URL	WebDAV 存档同步设置
+dmDAVUser	用户名	Username	WebDAV 存档同步设置
+dmDAVPassword	密码或应用密码	Password or app password	WebDAV 存档同步设置
+dmDAVHint	填写飞牛等服务的 HTTPS WebDAV 文件夹地址，两台设备使用同一个文件夹。密码仅保存在本机钥匙串。	Use an HTTPS WebDAV folder on fnOS or another server. Use the same folder on both devices. Your password stays in this device’s Keychain.	WebDAV 存档同步设置
+dmDAVTiming	启动时下载；退局、切后台时上传。游玩中不下载覆盖存档。修改配置后请彻底退出并重新打开 App。	Downloads happen at startup; uploads happen when leaving a run or backgrounding. Live saves are never replaced during play. Fully quit and reopen the app after changing configuration.	WebDAV 存档同步设置
+dmDAVSave	保存配置	Save configuration	WebDAV 存档同步设置
+dmDAVTest	测试连接	Test connection	WebDAV 存档同步设置
+dmDAVUpload	立即上传待同步存档	Upload pending saves now	WebDAV 存档同步设置
+dmDAVReady	同步正常	Sync ready	WebDAV 存档同步设置
+dmDAVBadConfig	请填写有效的 HTTPS 文件夹地址、用户名和密码。地址中不要包含密码、查询参数或片段。	Enter a valid HTTPS folder URL, username and password. Do not put credentials, a query or a fragment in the URL.	WebDAV 存档同步设置
+dmDAVOffline	网络不可用或请求超时；存档保留在本机。	Network unavailable or timed out. Saves remain on this device.	WebDAV 存档同步设置
+dmDAVAuth	认证或权限失败，请检查用户名、密码和文件夹权限。	Authentication or permission failed. Check your credentials and folder access.	WebDAV 存档同步设置
+dmDAVHTTP	服务器请求失败，未确认的存档不会覆盖云端索引。	Server request failed. Unconfirmed saves will not replace the server index.	WebDAV 存档同步设置
+dmDAVProtocol	服务器缺少安全同步所需的条件写入／强 ETag，或返回的数据损坏。	The server lacks conditional writes or strong ETags, or returned corrupt data.	WebDAV 存档同步设置
+dmDAVConflict	同步冲突，尚未覆盖。若列出角色，请选择保留哪份；否则下次启动重试。	Sync conflict; nothing was overwritten. Choose a version for listed units, or retry at the next launch.	WebDAV 存档同步设置
+dmDAVRestart	下次启动检查并下载服务器存档；当前局不会被覆盖。	Server saves will be checked and downloaded at the next launch. The current run will not be overwritten.	WebDAV 存档同步设置
+dmDAVLocal	本地文件或钥匙串操作失败；原存档与备份保留。	A local file or Keychain operation failed. Original saves and backups are retained.	WebDAV 存档同步设置
+dmDAVLast	最近成功同步：%@	Last successful sync: %@	WebDAV 存档同步设置
+dmDAVNever	尚无成功同步记录	No successful sync yet	WebDAV 存档同步设置
+dmDAVSaved	配置已保存。请彻底退出并重新打开 App，使配置生效。	Configuration saved. Fully quit and reopen the app to apply it.	WebDAV 存档同步设置
+dmDAVConnected	连接、读写权限和条件更新检查通过。	Connection, write access and conditional updates passed.	WebDAV 存档同步设置
+dmDAVConnectFailed	连接检查未通过。请确认 HTTPS 证书、地址、凭据和读写权限；不支持条件写入的服务器不能使用。	Connection check failed. Check the HTTPS certificate, URL, credentials and write access. Conditional writes are required.	WebDAV 存档同步设置
+dmDAVChooseHint	两份存档都保留。选择只适用于本次检测到的两份内容；确认后在下次启动处理。共享仓库也不会自动合并。	Both versions are retained. Your choice applies only to these exact versions and takes effect at the next launch. Shared stashes are not automatically merged.	WebDAV 存档同步设置
+dmDAVUseLocal	使用本机这份	Use this device’s version	WebDAV 存档同步设置
+dmDAVUseRemote	使用服务器这份	Use the server’s version	WebDAV 存档同步设置
+dmDAVChoiceSaved	选择已保存；请彻底退出并重新打开 App。内容再变更时会重新询问。	Choice saved. Fully quit and reopen the app. You will be asked again if either version changes.	WebDAV 存档同步设置
+dmDAVCancel	取消	Cancel	WebDAV 存档同步设置
+dmDAVOK	好	OK	WebDAV 存档同步设置
+dmDAVShareLog	分享诊断日志	Share Diagnostics	WebDAV 存档同步设置
+dmDAVLocalNetwork	连接你的 WebDAV 服务器以同步存档。	Connect to your WebDAV server to sync saves.	WebDAV 存档同步设置
+dmDAVDisabled	WebDAV 同步未启用	WebDAV sync is disabled	WebDAV 存档同步状态

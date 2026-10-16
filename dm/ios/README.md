@@ -281,3 +281,21 @@ Under `tools/` there are also self-tests that come with a few of the scripts: `d
 | `screen_check.py`, `fullscreen_check.py` | Check orientation, black borders and stretching from whole-window screenshots |
 | `bootprof.sh`, `heat_ab.sh`, `gpu_read.sh`, `xtrace.sh` | Real-device measurements: startup timeline, heat comparison, GPU time, Instruments command-line recording |
 | `asset_manifest.py` | Generates the manifest for the direct asset download path |
+
+## WebDAV save sync (iPhone / iPad)
+
+Open **Saves & Diagnostics → WebDAV Save Sync** in the pause menu. On fnOS, enable WebDAV, create a dedicated folder, grant read/write access, and enter that folder’s **HTTPS WebDAV URL**, username and password. Use the same URL on both devices. Passwords stay in each device’s Keychain, outside configuration files, logs and backups; configure credentials separately on each device. The HTTPS certificate must be trusted by the system; TLS validation is never bypassed.
+
+Test the connection, enable sync, save configuration, then fully quit and reopen the app. With WebDAV enabled, that launch uses WebDAV exclusively, without also running iCloud sync. The game’s separate iCloud toggle does not control WebDAV.
+
+- Download before the game reads saves at startup. The network phase is bounded to about 20 seconds per sync, 5 seconds per request. Offline or failed sync leaves local saves usable.
+- Clone committed saves; keep only the newest snapshot during play, then upload when leaving a run or backgrounding. iOS controls background time. Unsent saves remain local and are retried at the next launch. Upload Pending Saves never replaces live saves with downloads.
+- If both devices change a character or shared stash, pause sync and choose a version per unit in settings. Decisions apply to those exact versions; subsequent changes prompt again. Downloads apply at the next launch. Shared stashes are not automatically merged.
+- Replaced local units use the core’s backup/rollback mechanism (three recent backups per unit). Immutable server objects and historical indexes remain available. Clearing local saves outside the game should not propagate a global deletion; in-game deletions propagate through post-commit sync.
+- Sync characters, shared stashes and their companion files only. Do not upload game resources, diagnostics, credentials or global settings.
+
+The server must support strong ETags and conditional `If-Match` / `If-None-Match` writes. Connection checks create a temporary probe, require ETags to change even for same-length edits, and verify stale writes are rejected. Unsupported servers fail closed; no unconditional-write fallback. Proxies must preserve these headers. Redirects are refused. Limits: 64 MiB per operation and 256 units. Old objects and history are not garbage-collected automatically yet.
+
+Protocol: under the selected folder, `d2r-mobile-v1/objects/<SHA256>.pack` contains immutable objects; `index.json` is `{ "version": 1, "units": { "character-or-_stash": "SHA256" } }`; `history/<UUID>.json` retains proposed published indexes. Deletions use pack tombstones rather than deleting remote objects. Upload complete packs before conditionally updating the index. HTTP 412 never advances the local checkpoint. Based on [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) and [RFC 9110 conditional requests](https://www.rfc-editor.org/rfc/rfc9110.html#name-conditional-requests).
+
+Validation without game files: `make -C dm/ios/tests test-webdav`. Requires macOS, Clang, Foundation and a local Postman CLI. Runs the real Objective-C transport and C save core over real HTTP against a local Postman WebDAV stand-in. Mock definitions: `postman/mocks/webdav/`; run separately with `postman simulate run postman/simulations/webdav.sim.yaml` (local port 49451; dummy credentials user/pass, testing only). This does not establish compatibility with every fnOS release, real networks or iOS background execution.

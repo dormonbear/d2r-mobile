@@ -1,0 +1,9 @@
+version: 1
+name: WebDAV save contract
+slug: webdav
+protocol: http
+port: 49451
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true

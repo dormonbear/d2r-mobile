@@ -281,3 +281,21 @@ make -C dm/ios/tests test
 | `screen_check.py`、`fullscreen_check.py` | 按整窗截图核对方向、黑边、拉伸 |
 | `bootprof.sh`、`heat_ab.sh`、`gpu_read.sh`、`xtrace.sh` | 真机测量：启动时间线、发热对照、GPU 时间、Instruments 命令行录制 |
 | `asset_manifest.py` | 给资源直接下载通路生成清单 |
+
+## WebDAV 存档同步（iPhone / iPad）
+
+在暂停菜单打开「存档与诊断」→「WebDAV 存档同步」。飞牛 fnOS 用户先开启 WebDAV，创建一个专用文件夹并授权读写，将该文件夹的 **HTTPS WebDAV 地址**、用户名和密码填入。两台设备填写同一地址；密码只存在各设备的钥匙串，不进入设置文件、日志或备份，也不会自动同步到另一台设备。HTTPS 证书必须受系统信任，不跳过 TLS 校验。
+
+先点「测试连接」，再启用并保存配置；彻底退出并重新打开 App 后生效。启用 WebDAV 后，本次启动只使用 WebDAV，不再同时运行 iCloud 同步；游戏自定义页的 iCloud 开关不控制 WebDAV。
+
+- 启动时、游戏读取存档之前下载。每次同步的网络阶段最多约 20 秒，单请求最多 5 秒；断网或失败继续使用本地存档。
+- 存档提交时复制快照；局内仅保留最新快照，退局或切后台时上传。后台时间由 iOS 决定，未传完的存档保留，下次启动重试。「立即上传待同步存档」不会在局内下载覆盖角色。
+- 同名角色或共享仓库两边都改过时，暂停同步，在设置页逐项选择本机或服务器版本；选择绑定当时两份内容，再次变化会重新询问。下载在下次启动执行。共享仓库不做自动合并。
+- 换下的本地单位沿用同步核心的备份与回滚（每单位最近三份），服务器保留不可变存档对象和历史索引。游戏外清空本机存档不应被当作全设备删除；游戏内删除须由提交后的同步传播。
+- 只同步角色、共享仓库及其配套文件；不上传游戏资源、诊断日志、连接凭据或全局设置。
+
+服务器必须支持强 ETag，以及 `If-Match` / `If-None-Match` 条件写入。连接检查会创建临时探针，确认同长度内容变化也会更新 ETag，并拒绝旧版本写入；不支持时拒绝同步。不会自动降级为无条件覆盖。WebDAV 代理须保留这些请求头；不跟随重定向。单次数据上限 64 MiB、单位上限 256。服务器的旧对象和历史索引暂不自动清理。
+
+协议：选定文件夹下的 `d2r-mobile-v1/objects/<SHA256>.pack` 是不可变对象，`index.json` 是 `{ "version": 1, "units": { "角色名或_stash": "SHA256" } }`，`history/<UUID>.json` 保存发布候选索引。删除也使用包内删除标记，不删除远端对象。先上传完整包，最后条件更新索引；HTTP 412 不推进本机同步基准。协议依据 [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) 与 [RFC 9110 的条件请求](https://www.rfc-editor.org/rfc/rfc9110.html#name-conditional-requests)。
+
+无需游戏文件的验证：`make -C dm/ios/tests test-webdav`。需要 macOS、Clang、Foundation 与本机 Postman CLI；运行真实 Objective-C 传输层和 C 存档核心，对本地 Postman WebDAV 替身发真实 HTTP。模拟服务定义在 `postman/mocks/webdav/`，独立运行：`postman simulate run postman/simulations/webdav.sim.yaml`（本机 49451 端口，测试凭据为 user/pass，仅供测试）。不代表已在任意 fnOS 版本、真实网络或 iOS 后台验证。

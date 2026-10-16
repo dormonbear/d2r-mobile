@@ -40,3 +40,7 @@ for s in srcs:
 print('HEADER_SEARCH_PATHS = $(inherited) ' + ' '.join(f'"{d}"' for d in incs + dirs))
 print('OTHER_CFLAGS = $(inherited) ' + ' '.join(defs))
 print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in fws if f != 'Cocoa'))
+# 系统的局域网权限说明：默认英文与本地化文案都来自中英表。
+# System local-network permission: both the English default and localizations come from the bilingual table.
+import dm_i18n
+print('DM_LOCAL_NETWORK_USAGE = ' + next(en for key, zh, en in dm_i18n.rows() if key == 'dmDAVLocalNetwork'))

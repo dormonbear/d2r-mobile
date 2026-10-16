@@ -1,11 +1,11 @@
-// 暂停菜单「分享诊断日志」的 iOS 侧。
+// 暂停菜单「存档与诊断」的 iOS 侧：选择 WebDAV 设置或分享诊断日志。
 // 按钮是游戏自己的控件（布局 tools/touch_layout.py 的 _pause_no_help：借原版「消息记录」按钮，换字、改发 PanelManager:ClosePanel:TouchShareLog），
 // 宿主收到这条空操作消息后调这里登记的回调（dm/host/diag.c）。这里做两件：
 //   ① 打一个文件：头部（构建号、机型、系统版本、温控 / 电量 / 内存 / 存储、本局与上一局的关键性能读数）+ 本局 boot.txt + 上一局 boot.previous.txt（main.m 每次启动前改名留下）；
 //   ② 弹系统分享面板（UIActivityViewController），玩家自己选发到哪；iPad / Mac 上分享面板是弹出框，必须给锚点，否则一弹就崩。
 // 隐私：只放这两份日志（游戏与宿主自己写的）和上面那几项机器读数；不取设备名、不取任何账号 / 位置 / 通讯录类信息。
 // 测试开关 DM_TEST_SHARELOG_CLOSE=<秒>：分享面板照常弹出，过这么多秒自动收起；导出的文件另拷一份到 Documents/sharelog_test.txt 供回归核内容。
-// iOS side of the pause menu's 「分享诊断日志」(Share Diagnostics).
+// iOS side of the pause menu's Saves & Diagnostics entry: WebDAV settings or diagnostic export.
 // The button is the game's own widget (layout: _pause_no_help in tools/touch_layout.py: borrows the original game's 「消息记录」(Message Log) button, changes the text, and makes it send PanelManager:ClosePanel:TouchShareLog instead),
 // and on receiving this no-op message the host calls the callback registered here (dm/host/diag.c). Two things are done here:
 //   ① Build one file: header (build number, device model, OS version, thermal / battery / memory / storage, key performance readings of this run and the previous run) + this run's boot.txt + the previous run's boot.previous.txt (left by main.m's rename before each launch);
@@ -115,5 +115,21 @@ static void on_click(void) {   // 宿主在游戏主线程调：玩家点了「�
         });
     });
 }
-void dm_sharelog_boot(void) { g_t0 = NSDate.date; dm_sharelog_init(on_click); }   // main.m 起宿主前调一次 | main.m calls this once before starting the host
+// 暂停菜单的共用工具入口；原来的诊断导出仍可独立调用。
+// Shared pause-menu tools entry; diagnostic export remains independently callable.
+static void on_tools(void) {
+    if (getenv("DM_TEST_SHARELOG_CLOSE")) { on_click(); return; }
+    dispatch_async(dispatch_get_main_queue(), ^{ UIViewController *vc = top_vc(); if (!vc || [vc isKindOfClass:UIAlertController.class]) return;
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@(dm_ui("dmPauseShareLog")) message:nil preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@(dm_ui("dmDAVTitle")) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { (void)action; [vc dismissViewControllerAnimated:YES completion:^{ void dm_webdav_present(void); dm_webdav_present(); }]; }]];
+        [a addAction:[UIAlertAction actionWithTitle:@(dm_ui("dmDAVShareLog")) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { (void)action; [vc dismissViewControllerAnimated:YES completion:^{ on_click(); }]; }]];
+        [a addAction:[UIAlertAction actionWithTitle:@(dm_ui("dmDAVCancel")) style:UIAlertActionStyleCancel handler:nil]];
+        [vc presentViewController:a animated:YES completion:nil];
+    });
+}
+void dm_sharelog_boot(void) { g_t0 = NSDate.date; dm_sharelog_init(on_tools);
+    // 真机界面验收只弹设置，不填凭据或启用同步；默认不执行。
+    // Device UI acceptance opens settings without supplying credentials or enabling sync; off by default.
+    if (getenv("DM_TEST_WEBDAV_UI")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ void dm_webdav_present(void); dm_webdav_present(); });
+}   // main.m 起宿主前调一次 | main.m calls this once before starting the host
 void dm_sharelog_share(void) { on_click(); }   // 游戏外的界面直接调（资源下载页的「分享诊断日志」按钮，main.m AssetVC） | called directly from screens outside the game (the "Share diagnostic log" button on the asset download page, main.m AssetVC)

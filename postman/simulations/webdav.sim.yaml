@@ -1,0 +1,6 @@
+simulation: webdav-save-sync
+routing: path
+port: 49452
+mocks:
+  - routeKey: webdav
+    path: ../mocks/webdav/config.yaml
