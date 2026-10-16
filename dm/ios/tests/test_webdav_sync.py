@@ -333,6 +333,68 @@ class WebDAVSync(unittest.TestCase):
         self.assertTrue(all(r['ifNoneMatch'] == '*' or r['ifMatch'] for r in indexes))
         self.assertTrue(any(r['method'] == 'GET' and '/objects/' in r['path'] for r in requests))
 
+    def test_fnos_uses_enforced_collection_lock_when_conditionals_are_ignored(self):
+        self.control(fault='fnos')
+        self.baseline()
+        self.put('a', 'fnos update')
+        self.assertTrue(self.sync('a', down=False)['ok'])
+        self.assertTrue(self.sync('b')['ok'])
+        self.assertEqual(self.contents('b'), 'fnos update')
+        report = self.control()
+        self.assertFalse(report['lockActive'])
+        self.assertTrue(any(r['method'] == 'LOCK' for r in report['served']))
+        self.assertTrue(any(r['method'] == 'UNLOCK' for r in report['served']))
+        index_writes = [r for r in report['served'] if r['method'] == 'PUT' and r['path'].endswith('/index.json')]
+        self.assertTrue(index_writes)
+        self.assertTrue(all(r['hasLock'] for r in index_writes))
+
+    def test_concurrent_fnos_clients_preserve_both_devices_progress(self):
+        self.control(fault='fnos')
+        self.baseline()
+        self.put('a', 'alice progress')
+        self.put('b', 'bob progress', name='Bob')
+        self.control(fault='fnos-delayed')
+        processes = []
+        for name in ('a', 'b'):
+            save = self.device(name)
+            processes.append(subprocess.Popen([str(self.client), self.url, str(save), str(save.parent / 'work'), '1'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        reports = []
+        for process in processes:
+            output, error = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, error)
+            reports.append(json.loads(output.splitlines()[-1]))
+        self.assertTrue(any(r['ok'] for r in reports))
+        for name, report in zip(('a', 'b'), reports):
+            if not report['ok']:
+                self.assertEqual(report['code'], 6)
+                self.assertTrue(self.sync(name)['ok'])
+        self.assertTrue(self.sync('c')['ok'])
+        self.assertEqual(self.contents('c'), 'alice progress')
+        self.assertEqual((self.device('c') / 'Bob/Bob.d2s').read_text(), 'bob progress')
+        self.assertFalse(self.control()['lockActive'])
+
+    def test_unenforced_collection_lock_is_rejected(self):
+        self.control(fault='fnos-unsafe-lock')
+        self.put('a', 'local only')
+        self.assertEqual(self.sync('a')['code'], 5)
+        self.assertEqual(self.contents('a'), 'local only')
+        self.assertIsNone(self.control()['index'])
+        self.assertFalse(self.control()['lockActive'])
+
+    def test_expired_collection_lock_cannot_publish_or_advance_checkpoint(self):
+        self.control(fault='fnos')
+        self.baseline()
+        checkpoint = self.case / 'a/work/checkpoint.json'
+        before = checkpoint.read_bytes()
+        index = self.control()['index']
+        self.put('a', 'unpublished progress')
+        self.control(fault='fnos-expired')
+        self.assertEqual(self.sync('a', down=False)['code'], 6)
+        self.assertEqual(checkpoint.read_bytes(), before)
+        self.assertEqual(self.control()['index'], index)
+        self.control(fault='fnos')
+        self.assertTrue(self.sync('a', down=False)['ok'])
+
     def test_unwritable_root_is_reported_before_any_save_upload(self):
         self.control(fault='unwritable-root')
         device = self.device('unwritable')
@@ -348,7 +410,7 @@ class WebDAVSync(unittest.TestCase):
         self.assertEqual(self.control()['files'], [])
 
     def test_connection_failures_have_redacted_request_diagnostics(self):
-        for fault, code, status in [('auth', 3, 401), ('server', 4, 500), ('noetag', 5, 200), ('unexpected-precondition', 5, 412)]:
+        for fault, code, status in [('auth', 3, 401), ('server', 4, 500), ('noetag', 5, 501), ('unexpected-precondition', 5, 501)]:
             self.control(fault=fault)
             device = self.device('check-' + fault)
             result = subprocess.run([str(self.client), self.url, str(device), str(device.parent / 'work'), 'check'], capture_output=True, text=True, timeout=25, check=True)
@@ -361,7 +423,7 @@ class WebDAVSync(unittest.TestCase):
             self.assertNotIn('dXNlcjpwYXNz', encoded)
             self.assertNotIn(self.url, encoded)
             self.assertNotIn('127.0.0.1', encoded)
-            self.assertIn(out['diagnostics']['method'], ('MKCOL', 'GET', 'PUT'))
+            self.assertIn(out['diagnostics']['method'], ('MKCOL', 'GET', 'PUT', 'LOCK'))
         self.control(fault='')
 
     def test_connection_network_failure_has_no_success_status_or_address(self):

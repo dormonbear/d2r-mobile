@@ -56,6 +56,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 @property(nonatomic) NSString *authorization, *directory;
 @property(nonatomic) NSDate *deadline;
 @property(nonatomic) DMDAVRequest *http;
+@property(nonatomic) NSString *lockToken;
 @property(nonatomic, readwrite) NSDictionary<NSString *, NSDictionary *> *conflicts;
 @property(nonatomic, readwrite) NSDictionary *diagnostics;
 @end
@@ -82,7 +83,9 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSURL *url = path.length ? [self.root URLByAppendingPathComponent:path] : self.root;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:MIN(left, 5)];
     request.HTTPMethod = method; request.HTTPBody = data; [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"]; [request setValue:self.authorization forHTTPHeaderField:@"Authorization"];
-    if (header) [request setValue:value forHTTPHeaderField:header]; if (data) [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+    if (self.lockToken) [request setValue:[NSString stringWithFormat:@"(%@)", self.lockToken] forHTTPHeaderField:@"If"];
+    if ([method isEqual:@"LOCK"]) { [request setValue:@"infinity" forHTTPHeaderField:@"Depth"]; [request setValue:@"Second-60" forHTTPHeaderField:@"Timeout"]; }
+    if (header) [request setValue:value forHTTPHeaderField:header]; if (data) [request setValue:[method isEqual:@"LOCK"] ? @"application/xml; charset=utf-8" : @"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
     if (!self.http) {
         self.http = [DMDAVRequest new];
         NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration; cfg.URLCache = nil; cfg.HTTPCookieStorage = nil; cfg.URLCredentialStorage = nil; cfg.timeoutIntervalForResource = 5;
@@ -94,7 +97,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     [[session dataTaskWithRequest:request] resume];
     if (dispatch_semaphore_wait(result.done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MIN(left, 5) * NSEC_PER_SEC)))) {
         [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@0, @"networkDomain":NSURLErrorDomain, @"networkCode":@(NSURLErrorTimedOut)}];
-        [session invalidateAndCancel]; fail(error, DMWebDAVNetwork); return nil;
+        [session invalidateAndCancel]; self.http = nil; fail(error, DMWebDAVNetwork); return nil;
     }
     [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@(result.response.statusCode), @"networkDomain":result.error.domain ?: @"", @"networkCode":@(result.error.code), @"elapsed_ms":@((NSInteger)(-[started timeIntervalSinceNow] * 1000))}];
     if (result.error) { fail(error, [result.error.domain isEqual:@"D2RWebDAV"] ? (DMWebDAVError)result.error.code : DMWebDAVNetwork); return nil; }
@@ -103,7 +106,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 }
 - (BOOL)makeCollection:(NSString *)path error:(NSError **)error {
     DMDAVRequest *r = [self request:@"MKCOL" path:path.length ? [path stringByAppendingString:@"/"] : path data:nil condition:nil value:nil error:error]; if (!r) return NO;
-    return r.response.statusCode == 201 || r.response.statusCode == 405 ? YES : fail(error, DMWebDAVHTTP);
+    return r.response.statusCode == 201 || r.response.statusCode == 405 ? YES : fail(error, r.response.statusCode == 423 ? DMWebDAVConflict : DMWebDAVHTTP);
 }
 - (BOOL)prepare:(NSError **)error {
     return [NSFileManager.defaultManager createDirectoryAtPath:self.directory withIntermediateDirectories:YES attributes:nil error:error] && [self makeCollection:@"" error:error] && [self makeCollection:@"objects" error:error] && [self makeCollection:@"history" error:error];
@@ -111,7 +114,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 - (BOOL)probe:(NSError **)error {
     NSString *path = [@"probe-" stringByAppendingString:NSUUID.UUID.UUIDString]; NSData *d = [@"D2R WebDAV conditional write check" dataUsingEncoding:NSUTF8StringEncoding];
     DMDAVRequest *create = [self request:@"PUT" path:path data:d condition:@"If-None-Match" value:@"*" error:error];
-    if (!create) return NO; if (create.response.statusCode != 201) return fail(error, (create.response.statusCode >= 400 && create.response.statusCode != 412) ? DMWebDAVHTTP : DMWebDAVProtocol);
+    if (!create) return NO; if (create.response.statusCode != 201) return fail(error, create.response.statusCode == 423 ? DMWebDAVConflict : (create.response.statusCode >= 400 && create.response.statusCode != 412) ? DMWebDAVHTTP : DMWebDAVProtocol);
     DMDAVRequest *first = [self request:@"GET" path:path data:nil condition:nil value:nil error:error]; if (!first) return NO;
     NSString *tag = [first.response valueForHTTPHeaderField:@"ETag"];
     if (first.response.statusCode != 200 || !strongETag(tag)) return fail(error, DMWebDAVProtocol);
@@ -128,10 +131,51 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     self.diagnostics = diagnostic;
     return ok ? YES : fail(error, DMWebDAVProtocol);
 }
+// 部分服务器忽略 HTTP 条件头；只有实测可强制执行的集合排他锁才可作为替代。
+// Some servers ignore HTTP conditional headers; only a verified, enforced exclusive collection lock is an acceptable alternative.
+- (BOOL)lockAndProbe:(NSError **)error {
+    NSData *body = [@"<?xml version='1.0'?><D:lockinfo xmlns:D='DAV:'><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>" dataUsingEncoding:NSUTF8StringEncoding];
+    DMDAVRequest *lock = [self request:@"LOCK" path:@"" data:body condition:nil value:nil error:error]; if (!lock) return NO;
+    if (lock.response.statusCode == 423) return fail(error, DMWebDAVConflict);
+    NSString *token = [lock.response valueForHTTPHeaderField:@"Lock-Token"];
+    if ((lock.response.statusCode != 200 && lock.response.statusCode != 201) || token.length < 3 || token.length > 1024 || ![token hasPrefix:@"<"] || ![token hasSuffix:@">"] || [token rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return fail(error, DMWebDAVProtocol);
+    self.lockToken = token;
+    NSString *path = [@"probe-" stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSData *original = [@"D2R lock probe original" dataUsingEncoding:NSUTF8StringEncoding], *changed = [@"D2R lock probe changed" dataUsingEncoding:NSUTF8StringEncoding];
+    DMDAVRequest *put = [self request:@"PUT" path:path data:original condition:nil value:nil error:error]; if (!put) return NO;
+    if (put.response.statusCode < 200 || put.response.statusCode >= 300) return fail(error, DMWebDAVProtocol);
+    // 无令牌和失效令牌都必须拒绝，并逐次读回确认没有暗中改写。
+    // Missing and stale tokens must both fail; read back after each attempt to verify no hidden overwrite occurred.
+    for (int stale = 0; stale < 2; stale++) {
+        DMDAVRequest *denied = [self request:@"PUT" path:path data:changed condition:@"If" value:stale ? @"(<urn:uuid:00000000-0000-0000-0000-000000000000>)" : nil error:error]; if (!denied) return NO;
+        if (denied.response.statusCode != 412 && denied.response.statusCode != 423) return fail(error, DMWebDAVProtocol);
+        DMDAVRequest *get = [self request:@"GET" path:path data:nil condition:nil value:nil error:error]; if (!get) return NO;
+        if (get.response.statusCode != 200 || ![get.data isEqual:original]) return fail(error, DMWebDAVProtocol);
+    }
+    DMDAVRequest *update = [self request:@"PUT" path:path data:changed condition:nil value:nil error:error]; if (!update) return NO;
+    DMDAVRequest *get = [self request:@"GET" path:path data:nil condition:nil value:nil error:error]; if (!get) return NO;
+    if (update.response.statusCode < 200 || update.response.statusCode >= 300 || get.response.statusCode != 200 || ![get.data isEqual:changed]) return fail(error, DMWebDAVProtocol);
+    [self request:@"DELETE" path:path data:nil condition:nil value:nil error:nil];
+    return YES;
+}
+- (BOOL)coordinate:(NSError **)error {
+    NSError *conditional = nil; if ([self probe:&conditional]) return YES;
+    if (![conditional.domain isEqual:@"D2RWebDAV"] || conditional.code != DMWebDAVProtocol) { if (error) *error = conditional; return NO; }
+    return [self lockAndProbe:error];
+}
+- (void)finish {
+    if (self.lockToken) {
+        NSDictionary *diagnostic = self.diagnostics; NSDate *deadline = self.deadline;
+        self.deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+        [self request:@"UNLOCK" path:@"" data:nil condition:@"Lock-Token" value:self.lockToken error:nil];
+        self.lockToken = nil; self.deadline = deadline; self.diagnostics = diagnostic;
+    }
+    [self.http.session invalidateAndCancel]; self.http = nil;
+}
 - (BOOL)checkConnection:(NSError **)error {
     self.diagnostics = @{}; self.deadline = [NSDate dateWithTimeIntervalSinceNow:15];
-    @try { return [self prepare:error] && [self probe:error]; }
-    @finally { [self.http.session invalidateAndCancel]; self.http = nil; }
+    @try { return [self prepare:error] && [self coordinate:error]; }
+    @finally { [self finish]; }
 }
 - (BOOL)resolveUnit:(NSString *)unit useLocal:(BOOL)local error:(NSError **)error {
     NSDictionary *conflict = self.conflicts[unit]; if (!conflict) return fail(error, DMWebDAVConflict);
@@ -141,7 +185,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 }
 - (BOOL)syncSave:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
     @try { return [self performSync:save allowDownload:download error:error]; }
-    @finally { [self.http.session invalidateAndCancel]; self.http = nil; }
+    @finally { [self finish]; }
 }
 - (BOOL)performSync:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
     self.diagnostics = @{}; self.deadline = [NSDate dateWithTimeIntervalSinceNow:20]; self.conflicts = @{};
@@ -168,12 +212,12 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     }
     // 运行时提交才生成删除标记；启动发现缺档时保留镜像，从服务器恢复，避免意外清空传播。
     // Only runtime commits create tombstones; missing saves at startup retain the mirror for recovery instead of propagating an accidental wipe.
-    if (![self prepare:error] || ![self probe:error]) return NO;
+    if (![self prepare:error] || ![self coordinate:error]) return NO;
     DMDAVRequest *head = [self request:@"GET" path:@"index.json" data:nil condition:nil value:nil error:error]; if (!head) return NO;
     NSDictionary *remote = @{}; BOOL absent = head.response.statusCode == 404;
     NSString *etag = [head.response valueForHTTPHeaderField:@"ETag"];
     if (!absent) {
-        if (head.response.statusCode != 200 || head.data.length > (256u << 10) || !strongETag(etag)) return fail(error, DMWebDAVProtocol);
+        if (head.response.statusCode != 200 || head.data.length > (256u << 10) || (!self.lockToken && !strongETag(etag))) return fail(error, DMWebDAVProtocol);
         id json = [NSJSONSerialization JSONObjectWithData:head.data options:0 error:nil];
         if (![json isKindOfClass:NSDictionary.class] || ![json[@"version"] isEqual:@1] || ![json[@"units"] isKindOfClass:NSDictionary.class]) return fail(error, DMWebDAVProtocol);
         remote = json[@"units"]; if (remote.count > 256) return fail(error, DMWebDAVProtocol);
@@ -241,7 +285,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
         for (NSString *unit in chosen) if (!equal(chosen[unit], remote[unit])) outbound[unit] = chosen[unit];
         if (!writeJSON(outbound, publishing)) return fail(error, DMWebDAVLocal);
         DMDAVRequest *put = [self request:@"PUT" path:@"index.json" data:data condition:absent ? @"If-None-Match" : @"If-Match" value:absent ? @"*" : etag error:error]; if (!put) return NO;
-        if (put.response.statusCode == 412) { [fm removeItemAtPath:publishing error:nil]; return fail(error, DMWebDAVConflict); }
+        if (put.response.statusCode == 412 || put.response.statusCode == 423) { [fm removeItemAtPath:publishing error:nil]; return fail(error, DMWebDAVConflict); }
         if (put.response.statusCode != 200 && put.response.statusCode != 201 && put.response.statusCode != 204) return fail(error, DMWebDAVHTTP);
     }
     if (download) for (NSString *unit in chosen) {
