@@ -127,9 +127,5 @@ static void on_tools(void) {
         [vc presentViewController:a animated:YES completion:nil];
     });
 }
-void dm_sharelog_boot(void) { g_t0 = NSDate.date; dm_sharelog_init(on_tools);
-    // 真机界面验收只弹设置，不填凭据或启用同步；默认不执行。
-    // Device UI acceptance opens settings without supplying credentials or enabling sync; off by default.
-    if (getenv("DM_TEST_WEBDAV_UI")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ void dm_webdav_present(void); dm_webdav_present(); });
-}   // main.m 起宿主前调一次 | main.m calls this once before starting the host
+void dm_sharelog_boot(void) { g_t0 = NSDate.date; dm_sharelog_init(on_tools); }   // main.m 起宿主前调一次 | main.m calls this once before starting the host
 void dm_sharelog_share(void) { on_click(); }   // 游戏外的界面直接调（资源下载页的「分享诊断日志」按钮，main.m AssetVC） | called directly from screens outside the game (the "Share diagnostic log" button on the asset download page, main.m AssetVC)

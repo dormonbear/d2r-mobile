@@ -7,6 +7,7 @@ const collections = new Set(['/']);
 let fault = '';
 let served = [];
 let lock = null;
+let secondLock = null;
 const hash = b => '"' + crypto.createHash('sha256').update(b).digest('hex') + '"';
 http.createServer((req, res) => {
   const path = decodeURI(new URL(req.url, 'http://localhost').pathname).replace(/\/$/, '') || '/';
@@ -22,7 +23,7 @@ http.createServer((req, res) => {
     if (path === '/__test__') {
       if (req.method === 'POST') {
         const command = JSON.parse(data.toString());
-        if (command.reset) { blobs.clear(); collections.clear(); collections.add('/'); fault = ''; served = []; lock = null; }
+        if (command.reset) { blobs.clear(); collections.clear(); collections.add('/'); fault = ''; served = []; lock = null; secondLock = null; }
         if ('fault' in command) fault = command.fault;
         if (command.mutate) blobs.set('/d2r-mobile-v1/index.json', Buffer.from(JSON.stringify(command.mutate)));
       }
@@ -35,11 +36,16 @@ http.createServer((req, res) => {
     const fnos = fault.startsWith('fnos');
     if (req.method === 'LOCK') {
       if (!fnos) return send(501);
+      if (lock && fault === 'fnos-shared-lock') {
+        secondLock = '<urn:uuid:' + crypto.randomUUID() + '>';
+        return send(200, Buffer.from('<D:prop xmlns:D="DAV:"/>'), { 'Lock-Token': secondLock });
+      }
       if (lock || fault === 'fnos-busy') return send(423);
       lock = { root: path, token: '<urn:uuid:' + crypto.randomUUID() + '>' };
       return send(200, Buffer.from('<D:prop xmlns:D="DAV:"/>'), { 'Lock-Token': lock.token });
     }
     if (req.method === 'UNLOCK') {
+      if (secondLock && req.headers['lock-token'] === secondLock) { secondLock = null; return send(204); }
       if (!lock || req.headers['lock-token'] !== lock.token) return send(409);
       lock = null; return send(204);
     }

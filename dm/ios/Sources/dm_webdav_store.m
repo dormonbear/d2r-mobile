@@ -17,6 +17,7 @@ static BOOL unitOK(NSString *name) {
 }
 static BOOL hashOK(id value) { return [value isKindOfClass:NSString.class] && [value length] == 64 && [value rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location == NSNotFound; }
 static BOOL strongETag(NSString *tag) { return tag.length >= 2 && [tag hasPrefix:@"\""] && [tag hasSuffix:@"\""] && ![tag containsString:@"\n"] && ![tag containsString:@"\r"]; }
+static BOOL lockTokenOK(NSString *token) { return token.length >= 3 && token.length <= 1024 && [token hasPrefix:@"<"] && [token hasSuffix:@">"] && [token rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location == NSNotFound; }
 static BOOL equal(id a, id b) { return a == b || [a isEqual:b]; }
 static NSDictionary *readJSON(NSString *path) {
     NSData *d = [NSData dataWithContentsOfFile:path]; id obj = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
@@ -138,8 +139,22 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     DMDAVRequest *lock = [self request:@"LOCK" path:@"" data:body condition:nil value:nil error:error]; if (!lock) return NO;
     if (lock.response.statusCode == 423) return fail(error, DMWebDAVConflict);
     NSString *token = [lock.response valueForHTTPHeaderField:@"Lock-Token"];
-    if ((lock.response.statusCode != 200 && lock.response.statusCode != 201) || token.length < 3 || token.length > 1024 || ![token hasPrefix:@"<"] || ![token hasSuffix:@">"] || [token rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return fail(error, DMWebDAVProtocol);
+    if ((lock.response.statusCode != 200 && lock.response.statusCode != 201) || !lockTokenOK(token)) return fail(error, DMWebDAVProtocol);
     self.lockToken = token;
+    // 第二位持有者必须被拒绝，否则有效令牌仍可能并发覆盖索引。
+    // Reject a second owner; validating tokens alone does not prevent concurrent index overwrites.
+    DMDAVRequest *second = [self request:@"LOCK" path:@"" data:body condition:@"If" value:nil error:error]; if (!second) return NO;
+    if (second.response.statusCode != 423) {
+        if (second.response.statusCode == 200 || second.response.statusCode == 201) {
+            NSString *extra = [second.response valueForHTTPHeaderField:@"Lock-Token"];
+            if (lockTokenOK(extra) && ![extra isEqual:token]) {
+                NSDictionary *diagnostic = self.diagnostics;
+                [self request:@"UNLOCK" path:@"" data:nil condition:@"Lock-Token" value:extra error:nil];
+                self.diagnostics = diagnostic;
+            }
+        }
+        return fail(error, DMWebDAVProtocol);
+    }
     NSString *path = [@"probe-" stringByAppendingString:NSUUID.UUID.UUIDString];
     NSData *original = [@"D2R lock probe original" dataUsingEncoding:NSUTF8StringEncoding], *changed = [@"D2R lock probe changed" dataUsingEncoding:NSUTF8StringEncoding];
     DMDAVRequest *put = [self request:@"PUT" path:path data:original condition:nil value:nil error:error]; if (!put) return NO;

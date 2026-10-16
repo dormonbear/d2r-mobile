@@ -52,7 +52,11 @@ class WebDAVSync(unittest.TestCase):
         try:
             cls.server.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(cls.server.pid, signal.SIGTERM)
+            try:
+                os.killpg(cls.server.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                if cls.server.poll() is None:
+                    cls.server.terminate()
             cls.server.wait(timeout=5)
         cls.log.close()
         if os.environ.get('DM_WEBDAV_TEST_ARTIFACTS'):
@@ -372,6 +376,18 @@ class WebDAVSync(unittest.TestCase):
         self.assertEqual(self.contents('c'), 'alice progress')
         self.assertEqual((self.device('c') / 'Bob/Bob.d2s').read_text(), 'bob progress')
         self.assertFalse(self.control()['lockActive'])
+
+    def test_nonexclusive_collection_lock_is_rejected_and_both_tokens_released(self):
+        self.control(fault='fnos-shared-lock')
+        self.put('a', 'local only')
+        self.assertEqual(self.sync('a')['code'], 5)
+        self.assertEqual(self.contents('a'), 'local only')
+        report = self.control()
+        self.assertIsNone(report['index'])
+        self.assertFalse(report['lockActive'])
+        self.assertEqual(sum(r['method'] == 'LOCK' and r['code'] == 200 for r in report['served']), 2)
+        self.assertTrue(all(not r['hasLock'] for r in report['served'] if r['method'] == 'LOCK'))
+        self.assertEqual(sum(r['method'] == 'UNLOCK' and r['code'] == 204 for r in report['served']), 2)
 
     def test_unenforced_collection_lock_is_rejected(self):
         self.control(fault='fnos-unsafe-lock')
