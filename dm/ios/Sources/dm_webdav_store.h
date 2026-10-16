@@ -7,6 +7,9 @@ typedef NS_ENUM(NSInteger, DMWebDAVError) {
 };
 @interface DMWebDAVStore : NSObject
 @property(nonatomic, readonly) NSDictionary<NSString *, NSDictionary *> *conflicts;
+// 诊断只含请求方法、相对路径和状态，不含地址、用户名、凭据或响应正文。
+// Diagnostics contain only method, relative path and status, never address, username, credentials or response body.
+@property(nonatomic, readonly) NSDictionary *diagnostics;
 - (instancetype)initWithURL:(NSURL *)url username:(NSString *)user password:(NSString *)password directory:(NSString *)directory;
 - (BOOL)checkConnection:(NSError **)error;
 - (BOOL)syncSave:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error;

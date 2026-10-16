@@ -112,7 +112,10 @@ int dm_webdav_flush_wait(double seconds) {
 - (void)done { [self.view endEditing:YES]; [self dismissViewControllerAnimated:YES completion:nil]; }
 - (void)refresh { [self.tableView reloadData]; }
 - (void)message:(const char *)key {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:T("dmDAVTitle") message:T(key) preferredStyle:UIAlertControllerStyleAlert];
+    [self messageText:T(key)];
+}
+- (void)messageText:(NSString *)text {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:T("dmDAVTitle") message:text preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:T("dmDAVOK") style:UIAlertActionStyleDefault handler:nil]]; [self presentViewController:a animated:YES completion:nil];
 }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { (void)tableView; return 4; }
@@ -142,7 +145,15 @@ int dm_webdav_flush_wait(double seconds) {
     if (path.section == 2 && path.row == 1) {
         NSDictionary *c = @{@"url":self.fields[0].text ?: @"", @"user":self.fields[1].text ?: @""}; NSString *secret = self.fields[2].text;
         dispatch_async(queue(), ^{ DMWebDAVStore *test = makeStore(c, secret); NSError *error = nil; BOOL ok = test && [test checkConnection:&error];
-            dispatch_async(dispatch_get_main_queue(), ^{ [self message:ok ? "dmDAVConnected" : "dmDAVConnectFailed"]; }); }); return;
+            NSDictionary *report = @{@"ok":@(ok), @"code":@(ok ? 0 : error ? error.code : DMWebDAVConfig), @"diagnostics":test.diagnostics ?: @{}};
+            NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil];
+            NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            [data writeToFile:[documents stringByAppendingPathComponent:@"webdav-check.json"] options:NSDataWritingAtomic error:nil];
+            NSInteger code = error ? error.code : DMWebDAVConfig;
+            const char *keys[] = {"dmDAVConnectFailed", "dmDAVBadConfig", "dmDAVOffline", "dmDAVAuth", "dmDAVHTTP", "dmDAVProtocol", "dmDAVConflict", "dmDAVRestart", "dmDAVLocal"};
+            NSString *text = T(ok ? "dmDAVConnected" : keys[MIN(MAX(code, 1), 8)]);
+            if (!ok && [test.diagnostics[@"httpStatus"] integerValue]) text = [text stringByAppendingFormat:@"\n%@ %@ — HTTP %@", test.diagnostics[@"method"], test.diagnostics[@"path"], test.diagnostics[@"httpStatus"]];
+            dispatch_async(dispatch_get_main_queue(), ^{ [self messageText:text]; }); }); return;
     }
     if (path.section == 2 && path.row == 2) {
         if (!dm_webdav_active() || !unchangedConfig()) { [self message:"dmDAVRestart"]; return; }

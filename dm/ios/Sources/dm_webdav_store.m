@@ -57,6 +57,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 @property(nonatomic) NSDate *deadline;
 @property(nonatomic) DMDAVRequest *http;
 @property(nonatomic, readwrite) NSDictionary<NSString *, NSDictionary *> *conflicts;
+@property(nonatomic, readwrite) NSDictionary *diagnostics;
 @end
 @implementation DMWebDAVStore
 - (instancetype)initWithURL:(NSURL *)url username:(NSString *)user password:(NSString *)password directory:(NSString *)directory {
@@ -68,10 +69,16 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     if (!secure || !url.host.length || url.user || url.password || url.query || url.fragment || !user.length || [user containsString:@":"] || !password.length) return nil;
     self.root = [url URLByAppendingPathComponent:@"d2r-mobile-v1" isDirectory:YES]; self.directory = directory;
     self.authorization = [@"Basic " stringByAppendingString:[[[user stringByAppendingFormat:@":%@", password] dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]];
-    self.conflicts = @{}; return self;
+    self.conflicts = @{}; self.diagnostics = @{}; return self;
+}
+- (void)recordRequest:(NSDictionary *)record {
+    NSMutableArray *requests = [self.diagnostics[@"requests"] mutableCopy] ?: [NSMutableArray array];
+    [requests addObject:record]; if (requests.count > 16) [requests removeObjectAtIndex:0];
+    NSMutableDictionary *diagnostic = [record mutableCopy]; diagnostic[@"requests"] = requests; self.diagnostics = diagnostic;
 }
 - (DMDAVRequest *)request:(NSString *)method path:(NSString *)path data:(NSData *)data condition:(NSString *)header value:(NSString *)value error:(NSError **)error {
-    NSTimeInterval left = [self.deadline timeIntervalSinceNow]; if (left <= 0) { fail(error, DMWebDAVNetwork); return nil; }
+    NSDate *started = NSDate.date;
+    NSTimeInterval left = [self.deadline timeIntervalSinceNow]; if (left <= 0) { [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@0, @"networkDomain":NSURLErrorDomain, @"networkCode":@(NSURLErrorTimedOut)}]; fail(error, DMWebDAVNetwork); return nil; }
     NSURL *url = path.length ? [self.root URLByAppendingPathComponent:path] : self.root;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:MIN(left, 5)];
     request.HTTPMethod = method; request.HTTPBody = data; [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"]; [request setValue:self.authorization forHTTPHeaderField:@"Authorization"];
@@ -86,8 +93,10 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSURLSession *session = result.session;
     [[session dataTaskWithRequest:request] resume];
     if (dispatch_semaphore_wait(result.done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MIN(left, 5) * NSEC_PER_SEC)))) {
+        [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@(result.response.statusCode), @"networkDomain":NSURLErrorDomain, @"networkCode":@(NSURLErrorTimedOut)}];
         [session invalidateAndCancel]; fail(error, DMWebDAVNetwork); return nil;
     }
+    [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@(result.response.statusCode), @"networkDomain":result.error.domain ?: @"", @"networkCode":@(result.error.code), @"elapsed_ms":@((NSInteger)(-[started timeIntervalSinceNow] * 1000))}];
     if (result.error) { fail(error, [result.error.domain isEqual:@"D2RWebDAV"] ? (DMWebDAVError)result.error.code : DMWebDAVNetwork); return nil; }
     if (result.response.statusCode == 401 || result.response.statusCode == 403) { fail(error, DMWebDAVAuth); return nil; }
     DMDAVRequest *completed = [DMDAVRequest new]; completed.data = result.data; completed.response = result.response; return completed;
@@ -102,7 +111,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 - (BOOL)probe:(NSError **)error {
     NSString *path = [@"probe-" stringByAppendingString:NSUUID.UUID.UUIDString]; NSData *d = [@"D2R WebDAV conditional write check" dataUsingEncoding:NSUTF8StringEncoding];
     DMDAVRequest *create = [self request:@"PUT" path:path data:d condition:@"If-None-Match" value:@"*" error:error];
-    if (!create) return NO; if (create.response.statusCode != 201) return fail(error, DMWebDAVProtocol);
+    if (!create) return NO; if (create.response.statusCode != 201) return fail(error, create.response.statusCode >= 400 ? DMWebDAVHTTP : DMWebDAVProtocol);
     DMDAVRequest *first = [self request:@"GET" path:path data:nil condition:nil value:nil error:error]; if (!first) return NO;
     NSString *tag = [first.response valueForHTTPHeaderField:@"ETag"];
     if (first.response.statusCode != 200 || !strongETag(tag)) return fail(error, DMWebDAVProtocol);
@@ -114,11 +123,13 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     DMDAVRequest *match = [self request:@"PUT" path:path data:d condition:@"If-Match" value:tag error:error]; if (!match) return NO;
     DMDAVRequest *none = [self request:@"PUT" path:path data:d condition:@"If-None-Match" value:@"*" error:error]; if (!none) return NO;
     BOOL ok = changedTag && match.response.statusCode == 412 && none.response.statusCode == 412;
+    NSDictionary *diagnostic = self.diagnostics;
     [self request:@"DELETE" path:path data:nil condition:nil value:nil error:nil];
+    self.diagnostics = diagnostic;
     return ok ? YES : fail(error, DMWebDAVProtocol);
 }
 - (BOOL)checkConnection:(NSError **)error {
-    self.deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    self.diagnostics = @{}; self.deadline = [NSDate dateWithTimeIntervalSinceNow:15];
     @try { return [self prepare:error] && [self probe:error]; }
     @finally { [self.http.session invalidateAndCancel]; self.http = nil; }
 }
@@ -133,7 +144,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     @finally { [self.http.session invalidateAndCancel]; self.http = nil; }
 }
 - (BOOL)performSync:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
-    self.deadline = [NSDate dateWithTimeIntervalSinceNow:20]; self.conflicts = @{};
+    self.diagnostics = @{}; self.deadline = [NSDate dateWithTimeIntervalSinceNow:20]; self.conflicts = @{};
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *snapshot = [self.directory stringByAppendingPathComponent:@"snapshot"], *export = [self.directory stringByAppendingPathComponent:@"export"];
     if (download && ![fm fileExistsAtPath:save] && ![fm createDirectoryAtPath:save withIntermediateDirectories:YES attributes:nil error:error]) return NO;

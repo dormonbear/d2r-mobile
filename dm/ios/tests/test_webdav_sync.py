@@ -333,6 +333,36 @@ class WebDAVSync(unittest.TestCase):
         self.assertTrue(all(r['ifNoneMatch'] == '*' or r['ifMatch'] for r in indexes))
         self.assertTrue(any(r['method'] == 'GET' and '/objects/' in r['path'] for r in requests))
 
+    def test_unwritable_root_is_reported_before_any_save_upload(self):
+        self.control(fault='unwritable-root')
+        device = self.device('unwritable')
+        result = subprocess.run([str(self.client), self.url, str(device), str(device.parent / 'work'), 'check'], capture_output=True, text=True, timeout=25, check=True)
+        out = json.loads(result.stdout.splitlines()[-1])
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['code'], 4)
+        self.assertEqual(out['diagnostics']['httpStatus'], 405)
+        requests = out['diagnostics']['requests']
+        self.assertEqual([r['method'] for r in requests], ['MKCOL', 'MKCOL', 'MKCOL', 'PUT'])
+        self.assertTrue(all(r['httpStatus'] == 405 for r in requests))
+        self.assertNotIn('/index.json', json.dumps(self.control()['served']))
+        self.assertEqual(self.control()['files'], [])
+
+    def test_connection_failures_have_redacted_request_diagnostics(self):
+        for fault, code, status in [('auth', 3, 401), ('server', 4, 500), ('noetag', 5, 200)]:
+            self.control(fault=fault)
+            device = self.device('check-' + fault)
+            result = subprocess.run([str(self.client), self.url, str(device), str(device.parent / 'work'), 'check'], capture_output=True, text=True, timeout=25, check=True)
+            out = json.loads(result.stdout.splitlines()[-1])
+            self.assertFalse(out['ok'])
+            self.assertEqual(out['code'], code)
+            self.assertEqual(out['diagnostics']['httpStatus'], status)
+            encoded = json.dumps(out['diagnostics'])
+            self.assertNotIn('authorization', encoded.lower())
+            self.assertNotIn('dXNlcjpwYXNz', encoded)
+            self.assertNotIn(self.url, encoded)
+            self.assertIn(out['diagnostics']['method'], ('MKCOL', 'GET'))
+        self.control(fault='')
+
     def test_unencrypted_non_loopback_or_embedded_credentials_are_rejected(self):
         self.assertEqual(self.sync('a', url='http://192.168.1.2/dav')['code'], 1)
         self.assertEqual(self.sync('a', url='https://user:secret@example.invalid/dav')['code'], 1)
