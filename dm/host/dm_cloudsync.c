@@ -348,7 +348,9 @@ static int pack_owns_paths(const cs_unit *u, const char *unit) {
 }
 // WebDAV 镜像只是本机快照，不参与 iCloud 的时间仲裁和共享仓库分叉规则。
 // A WebDAV mirror is only a local snapshot, independent of iCloud timestamp arbitration and stash fork rules.
-int dm_cloud_pack_export(const char *save, const char *mirror, unsigned long long now_ms) {
+// 只有运行时提交允许生成删除标记，启动时缺档应从服务器恢复。
+// Only runtime commits may create tombstones; missing saves at startup should recover from the server.
+int dm_cloud_pack_export(const char *save, const char *mirror, int allow_delete, unsigned long long now_ms) {
     if (!save || !mirror) return -1;
     char names[256][64]; int nn = 0; DIR *dp = opendir(save); struct dirent *e;
     if (!dp) return -1;
@@ -371,7 +373,7 @@ int dm_cloud_pack_export(const char *save, const char *mirror, unsigned long lon
             int present = local_read(save, names[i], local), previous = pack_read(path, old);
             if (present >= 0 && previous >= 0) {
                 if (present) result = pack_write(path, local);
-                else if (previous && !old->tomb) { cs_unit tomb = { .tomb = 1, .stamp = now_ms }; result = pack_write(path, &tomb); }
+                else if (allow_delete && previous && !old->tomb) { cs_unit tomb = { .tomb = 1, .stamp = now_ms }; result = pack_write(path, &tomb); }
                 else result = 0;
             }
         }

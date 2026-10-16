@@ -146,7 +146,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     [fm removeItemAtPath:snapshot error:nil];
     if (![fm copyItemAtPath:save toPath:snapshot error:error] || ![fm createDirectoryAtPath:export withIntermediateDirectories:YES attributes:nil error:error]) return NO;
     NSString *backup = [self.directory stringByAppendingPathComponent:@"backups"];
-    if (dm_cloud_pack_export(snapshot.fileSystemRepresentation, export.fileSystemRepresentation, (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000)) < 0) return fail(error, DMWebDAVLocal);
+    if (dm_cloud_pack_export(snapshot.fileSystemRepresentation, export.fileSystemRepresentation, !download, (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000)) < 0) return fail(error, DMWebDAVLocal);
     NSMutableDictionary *local = [NSMutableDictionary dictionary]; NSMutableDictionary *paths = [NSMutableDictionary dictionary]; NSUInteger total = 0;
     for (NSString *file in [fm contentsOfDirectoryAtPath:export error:nil]) {
         if (![file hasSuffix:@".pack"]) continue; NSString *unit = file.stringByDeletingPathExtension, *path = [export stringByAppendingPathComponent:file];
@@ -155,8 +155,8 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
         total += data.length; if (total > limitBytes || local.count >= 256) return fail(error, DMWebDAVLocal);
         local[unit] = digest(data); paths[local[unit]] = path;
     }
-    // 本地变更先落入导出镜像，离线删除不能在下次启动被旧包恢复。
-    // Export local changes before networking; an offline deletion must not be restored from an old pack.
+    // 运行时提交才生成删除标记；启动发现缺档时保留镜像，从服务器恢复，避免意外清空传播。
+    // Only runtime commits create tombstones; missing saves at startup retain the mirror for recovery instead of propagating an accidental wipe.
     if (![self prepare:error] || ![self probe:error]) return NO;
     DMDAVRequest *head = [self request:@"GET" path:@"index.json" data:nil condition:nil value:nil error:error]; if (!head) return NO;
     NSDictionary *remote = @{}; BOOL absent = head.response.statusCode == 404;

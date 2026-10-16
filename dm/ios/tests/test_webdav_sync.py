@@ -169,6 +169,19 @@ class WebDAVSync(unittest.TestCase):
                 self.put(device, 'unrelated progress', name='Bob')
                 self.assertTrue(self.sync(device, down=False)['ok'])
 
+    def test_missing_startup_save_does_not_publish_deletions(self):
+        self.baseline()
+        before = self.control()['index']
+        shutil.rmtree(self.device('a'))
+        self.assertTrue(self.sync('a')['ok'])
+        self.assertEqual(self.control()['index'], before)
+        self.assertEqual(self.contents('a'), 'base')
+        shutil.rmtree(self.device('a') / 'Alice')
+        self.assertTrue(self.sync('a')['ok'])
+        self.assertEqual(self.control()['index'], before)
+        self.assertTrue(self.sync('b')['ok'])
+        self.assertEqual(self.contents('b'), 'base')
+
     def test_offline_deletion_survives_next_startup(self):
         self.baseline()
         shutil.rmtree(self.device('a') / 'Alice')

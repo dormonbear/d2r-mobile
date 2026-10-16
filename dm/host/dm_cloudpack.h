@@ -4,4 +4,4 @@
 int dm_cloud_pack_validate(const char *pack, const char *unit);
 int dm_cloud_pack_apply(const char *save, const char *bak, const char *unit, const char *pack);
 // 导出提交快照与删除标记，不合并或选择历史镜像。 | Export a committed snapshot and tombstones without merging historical mirrors.
-int dm_cloud_pack_export(const char *save, const char *mirror, unsigned long long now_ms);
+int dm_cloud_pack_export(const char *save, const char *mirror, int allow_delete, unsigned long long now_ms);
