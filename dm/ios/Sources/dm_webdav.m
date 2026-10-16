@@ -147,9 +147,10 @@ int dm_webdav_flush_wait(double seconds) {
         dispatch_async(queue(), ^{ DMWebDAVStore *test = makeStore(c, secret); NSError *error = nil; BOOL ok = test && [test checkConnection:&error];
             NSDictionary *report = @{@"ok":@(ok), @"code":@(ok ? 0 : error ? error.code : DMWebDAVConfig), @"diagnostics":test.diagnostics ?: @{}};
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil];
-            NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-            [data writeToFile:[documents stringByAppendingPathComponent:@"webdav-check.json"] options:NSDataWritingAtomic error:nil];
-            NSInteger code = error ? error.code : DMWebDAVConfig;
+            NSString *cache = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+            [NSFileManager.defaultManager createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+            [data writeToFile:[cache stringByAppendingPathComponent:@"webdav-last-connection.json"] options:NSDataWritingAtomic error:nil];
+            NSInteger code = !test ? DMWebDAVConfig : [error.domain isEqual:@"D2RWebDAV"] ? error.code : DMWebDAVLocal;
             const char *keys[] = {"dmDAVConnectFailed", "dmDAVBadConfig", "dmDAVOffline", "dmDAVAuth", "dmDAVHTTP", "dmDAVProtocol", "dmDAVConflict", "dmDAVRestart", "dmDAVLocal"};
             NSString *text = T(ok ? "dmDAVConnected" : keys[MIN(MAX(code, 1), 8)]);
             if (!ok && [test.diagnostics[@"httpStatus"] integerValue]) text = [text stringByAppendingFormat:@"\n%@ %@ — HTTP %@", test.diagnostics[@"method"], test.diagnostics[@"path"], test.diagnostics[@"httpStatus"]];

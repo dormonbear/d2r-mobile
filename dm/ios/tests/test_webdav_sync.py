@@ -348,7 +348,7 @@ class WebDAVSync(unittest.TestCase):
         self.assertEqual(self.control()['files'], [])
 
     def test_connection_failures_have_redacted_request_diagnostics(self):
-        for fault, code, status in [('auth', 3, 401), ('server', 4, 500), ('noetag', 5, 200)]:
+        for fault, code, status in [('auth', 3, 401), ('server', 4, 500), ('noetag', 5, 200), ('unexpected-precondition', 5, 412)]:
             self.control(fault=fault)
             device = self.device('check-' + fault)
             result = subprocess.run([str(self.client), self.url, str(device), str(device.parent / 'work'), 'check'], capture_output=True, text=True, timeout=25, check=True)
@@ -360,8 +360,20 @@ class WebDAVSync(unittest.TestCase):
             self.assertNotIn('authorization', encoded.lower())
             self.assertNotIn('dXNlcjpwYXNz', encoded)
             self.assertNotIn(self.url, encoded)
-            self.assertIn(out['diagnostics']['method'], ('MKCOL', 'GET'))
+            self.assertNotIn('127.0.0.1', encoded)
+            self.assertIn(out['diagnostics']['method'], ('MKCOL', 'GET', 'PUT'))
         self.control(fault='')
+
+    def test_connection_network_failure_has_no_success_status_or_address(self):
+        self.control(fault='timeout')
+        device = self.device('network-check')
+        result = subprocess.run([str(self.client), self.url, str(device), str(device.parent / 'work'), 'check'], capture_output=True, text=True, timeout=15, check=True)
+        out = json.loads(result.stdout.splitlines()[-1])
+        self.assertEqual(out['code'], 2)
+        self.assertEqual(out['diagnostics']['httpStatus'], 0)
+        self.assertEqual(out['diagnostics']['networkDomain'], 'NSURLErrorDomain')
+        self.assertEqual(out['diagnostics']['networkCode'], -1001)
+        self.assertNotIn('127.0.0.1', json.dumps(out['diagnostics']))
 
     def test_unencrypted_non_loopback_or_embedded_credentials_are_rejected(self):
         self.assertEqual(self.sync('a', url='http://192.168.1.2/dav')['code'], 1)

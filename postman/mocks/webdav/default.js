@@ -31,6 +31,7 @@ http.createServer((req, res) => {
     if (fault === 'timeout') return setTimeout(() => send(503), 6500);
     if (fault === 'server') return send(500, Buffer.from('<html>unavailable</html>'));
     if (fault === 'redirect') return send(307, Buffer.alloc(0), { Location: 'http://127.0.0.1:1/__leak__' });
+    if (fault === 'unexpected-precondition' && req.method === 'PUT' && path.includes('/probe-')) return send(412);
     if (fault === 'unwritable-root' && ['MKCOL', 'PUT'].includes(req.method)) return send(405);
     if (req.method === 'MKCOL') { if (collections.has(path)) return send(405); collections.add(path); return send(201); }
     if (req.method === 'GET') {

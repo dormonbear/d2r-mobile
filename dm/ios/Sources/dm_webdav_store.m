@@ -93,7 +93,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSURLSession *session = result.session;
     [[session dataTaskWithRequest:request] resume];
     if (dispatch_semaphore_wait(result.done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MIN(left, 5) * NSEC_PER_SEC)))) {
-        [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@(result.response.statusCode), @"networkDomain":NSURLErrorDomain, @"networkCode":@(NSURLErrorTimedOut)}];
+        [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@0, @"networkDomain":NSURLErrorDomain, @"networkCode":@(NSURLErrorTimedOut)}];
         [session invalidateAndCancel]; fail(error, DMWebDAVNetwork); return nil;
     }
     [self recordRequest:@{@"method":method, @"path":path.length ? path : @"/", @"httpStatus":@(result.response.statusCode), @"networkDomain":result.error.domain ?: @"", @"networkCode":@(result.error.code), @"elapsed_ms":@((NSInteger)(-[started timeIntervalSinceNow] * 1000))}];
@@ -111,7 +111,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 - (BOOL)probe:(NSError **)error {
     NSString *path = [@"probe-" stringByAppendingString:NSUUID.UUID.UUIDString]; NSData *d = [@"D2R WebDAV conditional write check" dataUsingEncoding:NSUTF8StringEncoding];
     DMDAVRequest *create = [self request:@"PUT" path:path data:d condition:@"If-None-Match" value:@"*" error:error];
-    if (!create) return NO; if (create.response.statusCode != 201) return fail(error, create.response.statusCode >= 400 ? DMWebDAVHTTP : DMWebDAVProtocol);
+    if (!create) return NO; if (create.response.statusCode != 201) return fail(error, (create.response.statusCode >= 400 && create.response.statusCode != 412) ? DMWebDAVHTTP : DMWebDAVProtocol);
     DMDAVRequest *first = [self request:@"GET" path:path data:nil condition:nil value:nil error:error]; if (!first) return NO;
     NSString *tag = [first.response valueForHTTPHeaderField:@"ETag"];
     if (first.response.statusCode != 200 || !strongETag(tag)) return fail(error, DMWebDAVProtocol);
