@@ -27,13 +27,14 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:obj options:NSJSONWritingSortedKeys error:nil]; return data && [data writeToFile:path options:NSDataWritingAtomic error:nil];
 }
 
-// 每次请求独立的有界会话；拒绝重定向，凭据不会被带到其他地址；TLS 始终使用系统校验。
-// A bounded session per request; reject redirects so credentials cannot move to another URL; always use system TLS validation.
+// 每次同步复用一个有界会话，避免逐请求重做 TLS；拒绝重定向，凭据不会带到其他地址。
+// Reuse one bounded session per sync to avoid repeated TLS handshakes; reject redirects so credentials cannot move to another URL.
 @interface DMDAVRequest : NSObject <NSURLSessionDataDelegate>
 @property(nonatomic) NSMutableData *data;
 @property(nonatomic) NSHTTPURLResponse *response;
 @property(nonatomic) NSError *error;
 @property(nonatomic) dispatch_semaphore_t done;
+@property(nonatomic) NSURLSession *session;
 @end
 @implementation DMDAVRequest
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completion {
@@ -55,6 +56,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 @property(nonatomic) NSURL *root;
 @property(nonatomic) NSString *authorization, *directory;
 @property(nonatomic) NSDate *deadline;
+@property(nonatomic) DMDAVRequest *http;
 @property(nonatomic, readwrite) NSDictionary<NSString *, NSDictionary *> *conflicts;
 @end
 @implementation DMWebDAVStore
@@ -75,19 +77,21 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:MIN(left, 5)];
     request.HTTPMethod = method; request.HTTPBody = data; [request setValue:self.authorization forHTTPHeaderField:@"Authorization"];
     if (header) [request setValue:value forHTTPHeaderField:header]; if (data) [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
-    DMDAVRequest *result = [DMDAVRequest new]; result.data = [NSMutableData data]; result.done = dispatch_semaphore_create(0);
-    NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration; cfg.URLCache = nil; cfg.HTTPCookieStorage = nil; cfg.URLCredentialStorage = nil;
-    cfg.timeoutIntervalForResource = MIN(left, 5);
-    NSOperationQueue *queue = [NSOperationQueue new]; queue.maxConcurrentOperationCount = 1;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg delegate:result delegateQueue:queue];
+    if (!self.http) {
+        self.http = [DMDAVRequest new];
+        NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration; cfg.URLCache = nil; cfg.HTTPCookieStorage = nil; cfg.URLCredentialStorage = nil; cfg.timeoutIntervalForResource = 5;
+        NSOperationQueue *queue = [NSOperationQueue new]; queue.maxConcurrentOperationCount = 1;
+        self.http.session = [NSURLSession sessionWithConfiguration:cfg delegate:self.http delegateQueue:queue];
+    }
+    DMDAVRequest *result = self.http; result.data = [NSMutableData data]; result.response = nil; result.error = nil; result.done = dispatch_semaphore_create(0);
+    NSURLSession *session = result.session;
     [[session dataTaskWithRequest:request] resume];
     if (dispatch_semaphore_wait(result.done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MIN(left, 5) * NSEC_PER_SEC)))) {
         [session invalidateAndCancel]; fail(error, DMWebDAVNetwork); return nil;
     }
-    [session finishTasksAndInvalidate];
     if (result.error) { fail(error, [result.error.domain isEqual:@"D2RWebDAV"] ? (DMWebDAVError)result.error.code : DMWebDAVNetwork); return nil; }
     if (result.response.statusCode == 401 || result.response.statusCode == 403) { fail(error, DMWebDAVAuth); return nil; }
-    return result;
+    DMDAVRequest *completed = [DMDAVRequest new]; completed.data = result.data; completed.response = result.response; return completed;
 }
 - (BOOL)makeCollection:(NSString *)path error:(NSError **)error {
     DMDAVRequest *r = [self request:@"MKCOL" path:path data:nil condition:nil value:nil error:error]; if (!r) return NO;
@@ -114,7 +118,11 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     [self request:@"DELETE" path:path data:nil condition:nil value:nil error:nil];
     return ok ? YES : fail(error, DMWebDAVProtocol);
 }
-- (BOOL)checkConnection:(NSError **)error { self.deadline = [NSDate dateWithTimeIntervalSinceNow:15]; return [self prepare:error] && [self probe:error]; }
+- (BOOL)checkConnection:(NSError **)error {
+    self.deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    @try { return [self prepare:error] && [self probe:error]; }
+    @finally { [self.http.session invalidateAndCancel]; self.http = nil; }
+}
 - (BOOL)resolveUnit:(NSString *)unit useLocal:(BOOL)local error:(NSError **)error {
     NSDictionary *conflict = self.conflicts[unit]; if (!conflict) return fail(error, DMWebDAVConflict);
     NSString *file = [self.directory stringByAppendingPathComponent:@"choices.json"];
@@ -122,6 +130,10 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     return writeJSON(choices, file) ? YES : fail(error, DMWebDAVLocal);
 }
 - (BOOL)syncSave:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
+    @try { return [self performSync:save allowDownload:download error:error]; }
+    @finally { [self.http.session invalidateAndCancel]; self.http = nil; }
+}
+- (BOOL)performSync:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
     self.deadline = [NSDate dateWithTimeIntervalSinceNow:20]; self.conflicts = @{};
     if (![self prepare:error] || ![self probe:error]) return NO;
     DMDAVRequest *head = [self request:@"GET" path:@"index.json" data:nil condition:nil value:nil error:error]; if (!head) return NO;
