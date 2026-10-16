@@ -58,9 +58,9 @@ static void upload(void) {
     if (ok) { [NSFileManager.defaultManager removeItemAtPath:pending error:nil]; pending = nil; }
 }
 static void committed(const char *save) {
-    static _Atomic unsigned sequence; if (!unchangedConfig()) return;
-    NSString *snap = [work stringByAppendingPathComponent:[NSString stringWithFormat:@"pending-%u", atomic_fetch_add(&sequence, 1)]];
-    if (clonefile(save, snap.fileSystemRepresentation, 0)) { result(NO, [NSError errorWithDomain:@"D2RWebDAV" code:DMWebDAVLocal userInfo:nil]); return; }
+    if (!unchangedConfig()) return;
+    NSString *snap = [work stringByAppendingPathComponent:[@"pending-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    if (clonefile(save, snap.fileSystemRepresentation, 0)) { dispatch_async(queue(), ^{ result(NO, [NSError errorWithDomain:@"D2RWebDAV" code:DMWebDAVLocal userInfo:nil]); }); return; }
     int defer = atomic_load(&inRun) && !atomic_load(&inBackground);
     dispatch_async(queue(), ^{ if (pending) [NSFileManager.defaultManager removeItemAtPath:pending error:nil]; pending = snap; if (!defer) upload(); });
 }
@@ -78,8 +78,11 @@ int dm_webdav_active(void) { return atomic_load(&ownsSync); }
 void dm_webdav_foreground(void) { atomic_store(&inBackground, 0); }
 void dm_webdav_flush(int background) {
     if (background) atomic_store(&inBackground, 1);
-    UIBackgroundTaskIdentifier token = background ? [UIApplication.sharedApplication beginBackgroundTaskWithName:@"WebDAV save upload" expirationHandler:^{}] : UIBackgroundTaskInvalid;
-    dispatch_async(queue(), ^{ upload(); if (token != UIBackgroundTaskInvalid) dispatch_async(dispatch_get_main_queue(), ^{ [UIApplication.sharedApplication endBackgroundTask:token]; }); });
+    __block UIBackgroundTaskIdentifier token = UIBackgroundTaskInvalid;
+    if (background) token = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"WebDAV save upload" expirationHandler:^{
+        if (token != UIBackgroundTaskInvalid) { [UIApplication.sharedApplication endBackgroundTask:token]; token = UIBackgroundTaskInvalid; }
+    }];
+    dispatch_async(queue(), ^{ upload(); dispatch_async(dispatch_get_main_queue(), ^{ if (token != UIBackgroundTaskInvalid) { [UIApplication.sharedApplication endBackgroundTask:token]; token = UIBackgroundTaskInvalid; } }); });
 }
 int dm_webdav_flush_wait(double seconds) {
     dispatch_semaphore_t done = dispatch_semaphore_create(0); dispatch_async(queue(), ^{ upload(); dispatch_semaphore_signal(done); });
@@ -121,7 +124,7 @@ int dm_webdav_flush_wait(double seconds) {
     else if (path.section == 1) { UITextField *field = self.fields[path.row]; field.translatesAutoresizingMaskIntoConstraints = NO; [cell.contentView addSubview:field];
         [NSLayoutConstraint activateConstraints:@[[field.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16], [field.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16], [field.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8], [field.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8], [field.heightAnchor constraintGreaterThanOrEqualToConstant:30]]]; cell.selectionStyle = UITableViewCellSelectionStyleNone; }
     else if (path.section == 2) { const char *keys[] = {"dmDAVSave", "dmDAVTest", "dmDAVUpload"}; cell.textLabel.text = T(keys[path.row]); cell.textLabel.textColor = self.view.tintColor; }
-    else { @synchronized(guard) { if (path.row) { cell.textLabel.text = conflictUnits[path.row - 1]; cell.detailTextLabel.text = T("dmDAVConflict"); cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; }
+    else { @synchronized(guard) { if (path.row && (NSUInteger)path.row <= conflictUnits.count) { cell.textLabel.text = conflictUnits[path.row - 1]; cell.detailTextLabel.text = T("dmDAVConflict"); cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; }
         else { const char *keys[] = {"dmDAVReady", "dmDAVBadConfig", "dmDAVOffline", "dmDAVAuth", "dmDAVHTTP", "dmDAVProtocol", "dmDAVConflict", "dmDAVRestart", "dmDAVLocal"}; NSInteger s = MIN(MAX(status, 0), 8);
             NSDictionary *c = config(); NSString *last = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"D2RWebDAVSuccessDates"][account(c)];
             cell.textLabel.text = T(![c[@"enabled"] boolValue] ? "dmDAVDisabled" : !unchangedConfig() ? "dmDAVRestart" : keys[s]);

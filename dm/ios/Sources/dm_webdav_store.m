@@ -4,7 +4,6 @@
 #import <CommonCrypto/CommonDigest.h>
 #include "dm_cloudpack.h"
 #include <stdint.h>
-int dm_cloud_sync(const char *, const char *, const char *, const char *, int, uint64_t, int (*)(const char *));
 static const NSUInteger limitBytes = 64u << 20;
 static NSError *failure(DMWebDAVError code) { return [NSError errorWithDomain:@"D2RWebDAV" code:code userInfo:nil]; }
 static BOOL fail(NSError **error, DMWebDAVError code) { if (error) *error = failure(code); return NO; }
@@ -75,7 +74,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSTimeInterval left = [self.deadline timeIntervalSinceNow]; if (left <= 0) { fail(error, DMWebDAVNetwork); return nil; }
     NSURL *url = path.length ? [self.root URLByAppendingPathComponent:path] : self.root;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:MIN(left, 5)];
-    request.HTTPMethod = method; request.HTTPBody = data; [request setValue:self.authorization forHTTPHeaderField:@"Authorization"];
+    request.HTTPMethod = method; request.HTTPBody = data; [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"]; [request setValue:self.authorization forHTTPHeaderField:@"Authorization"];
     if (header) [request setValue:value forHTTPHeaderField:header]; if (data) [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
     if (!self.http) {
         self.http = [DMDAVRequest new];
@@ -94,7 +93,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     DMDAVRequest *completed = [DMDAVRequest new]; completed.data = result.data; completed.response = result.response; return completed;
 }
 - (BOOL)makeCollection:(NSString *)path error:(NSError **)error {
-    DMDAVRequest *r = [self request:@"MKCOL" path:path data:nil condition:nil value:nil error:error]; if (!r) return NO;
+    DMDAVRequest *r = [self request:@"MKCOL" path:path.length ? [path stringByAppendingString:@"/"] : path data:nil condition:nil value:nil error:error]; if (!r) return NO;
     return r.response.statusCode == 201 || r.response.statusCode == 405 ? YES : fail(error, DMWebDAVHTTP);
 }
 - (BOOL)prepare:(NSError **)error {
@@ -135,6 +134,29 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 }
 - (BOOL)performSync:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
     self.deadline = [NSDate dateWithTimeIntervalSinceNow:20]; self.conflicts = @{};
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *snapshot = [self.directory stringByAppendingPathComponent:@"snapshot"], *export = [self.directory stringByAppendingPathComponent:@"export"];
+    if (download && ![fm fileExistsAtPath:save] && ![fm createDirectoryAtPath:save withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+    NSUInteger localBytes = 0;
+    for (NSURL *file in [fm enumeratorAtURL:[NSURL fileURLWithPath:save] includingPropertiesForKeys:@[NSURLIsSymbolicLinkKey, NSURLFileSizeKey] options:0 errorHandler:nil]) {
+        NSNumber *link = nil, *size = nil; [file getResourceValue:&link forKey:NSURLIsSymbolicLinkKey error:nil]; [file getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+        localBytes += size.unsignedIntegerValue; if (link.boolValue || localBytes > limitBytes) return fail(error, DMWebDAVLocal);
+    }
+    if (![fm createDirectoryAtPath:self.directory withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+    [fm removeItemAtPath:snapshot error:nil];
+    if (![fm copyItemAtPath:save toPath:snapshot error:error] || ![fm createDirectoryAtPath:export withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+    NSString *backup = [self.directory stringByAppendingPathComponent:@"backups"];
+    if (dm_cloud_pack_export(snapshot.fileSystemRepresentation, export.fileSystemRepresentation, (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000)) < 0) return fail(error, DMWebDAVLocal);
+    NSMutableDictionary *local = [NSMutableDictionary dictionary]; NSMutableDictionary *paths = [NSMutableDictionary dictionary]; NSUInteger total = 0;
+    for (NSString *file in [fm contentsOfDirectoryAtPath:export error:nil]) {
+        if (![file hasSuffix:@".pack"]) continue; NSString *unit = file.stringByDeletingPathExtension, *path = [export stringByAppendingPathComponent:file];
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (!unitOK(unit) || !data || data.length > limitBytes || !dm_cloud_pack_validate(path.fileSystemRepresentation, unit.UTF8String)) return fail(error, DMWebDAVLocal);
+        total += data.length; if (total > limitBytes || local.count >= 256) return fail(error, DMWebDAVLocal);
+        local[unit] = digest(data); paths[local[unit]] = path;
+    }
+    // 本地变更先落入导出镜像，离线删除不能在下次启动被旧包恢复。
+    // Export local changes before networking; an offline deletion must not be restored from an old pack.
     if (![self prepare:error] || ![self probe:error]) return NO;
     DMDAVRequest *head = [self request:@"GET" path:@"index.json" data:nil condition:nil value:nil error:error]; if (!head) return NO;
     NSDictionary *remote = @{}; BOOL absent = head.response.statusCode == 404;
@@ -146,30 +168,20 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
         remote = json[@"units"]; if (remote.count > 256) return fail(error, DMWebDAVProtocol);
         for (NSString *unit in remote) if (!unitOK(unit) || !hashOK(remote[unit])) return fail(error, DMWebDAVProtocol);
     }
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *snapshot = [self.directory stringByAppendingPathComponent:@"snapshot"], *export = [self.directory stringByAppendingPathComponent:@"export"];
-    if (download && ![fm fileExistsAtPath:save] && ![fm createDirectoryAtPath:save withIntermediateDirectories:YES attributes:nil error:error]) return NO;
-    NSUInteger localBytes = 0;
-    for (NSURL *file in [fm enumeratorAtURL:[NSURL fileURLWithPath:save] includingPropertiesForKeys:@[NSURLIsSymbolicLinkKey, NSURLFileSizeKey] options:0 errorHandler:nil]) {
-        NSNumber *link = nil, *size = nil; [file getResourceValue:&link forKey:NSURLIsSymbolicLinkKey error:nil]; [file getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-        localBytes += size.unsignedIntegerValue; if (link.boolValue || localBytes > limitBytes) return fail(error, DMWebDAVLocal);
-    }
-    [fm removeItemAtPath:snapshot error:nil];
-    if (![fm copyItemAtPath:save toPath:snapshot error:error] || ![fm createDirectoryAtPath:export withIntermediateDirectories:YES attributes:nil error:error]) return NO;
-    NSString *state = [self.directory stringByAppendingPathComponent:@"export.state"], *backup = [self.directory stringByAppendingPathComponent:@"backups"];
-    if (dm_cloud_sync(snapshot.fileSystemRepresentation, export.fileSystemRepresentation, backup.fileSystemRepresentation, state.fileSystemRepresentation, download, (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000), NULL) < 0) return fail(error, DMWebDAVLocal);
-    NSMutableDictionary *local = [NSMutableDictionary dictionary]; NSMutableDictionary *paths = [NSMutableDictionary dictionary]; NSUInteger total = 0;
-    for (NSString *file in [fm contentsOfDirectoryAtPath:export error:nil]) {
-        if (![file hasSuffix:@".pack"]) continue; NSString *unit = file.stringByDeletingPathExtension, *path = [export stringByAppendingPathComponent:file];
-        NSData *data = [NSData dataWithContentsOfFile:path];
-        if (!unitOK(unit) || !data || data.length > limitBytes || !dm_cloud_pack_validate(path.fileSystemRepresentation, unit.UTF8String)) return fail(error, DMWebDAVLocal);
-        total += data.length; if (total > limitBytes || local.count >= 256) return fail(error, DMWebDAVLocal);
-        local[unit] = digest(data); paths[local[unit]] = path;
-    }
     NSString *checkpoint = [self.directory stringByAppendingPathComponent:@"checkpoint.json"];
     NSDictionary *base = readJSON(checkpoint), *baseLocal = base[@"local"] ?: @{}, *baseRemote = base[@"remote"] ?: @{};
     if (![baseLocal isKindOfClass:NSDictionary.class] || ![baseRemote isKindOfClass:NSDictionary.class]) return fail(error, DMWebDAVLocal);
     for (NSDictionary *map in @[baseLocal, baseRemote]) for (NSString *unit in map) if (!unitOK(unit) || !hashOK(map[unit])) return fail(error, DMWebDAVLocal);
+    NSString *publishing = [self.directory stringByAppendingPathComponent:@"pending-publish.json"];
+    NSDictionary *published = readJSON(publishing);
+    NSMutableDictionary *recoveredLocal = [baseLocal mutableCopy], *recoveredRemote = [baseRemote mutableCopy];
+    // 响应丢失时，只把已被服务器确认的本机发布版本作为共同祖先。
+    // After a lost response, recognize only locally published versions confirmed by the current server head.
+    for (NSString *unit in published) {
+        if (!unitOK(unit) || !hashOK(published[unit])) return fail(error, DMWebDAVLocal);
+        if (equal(remote[unit], published[unit])) { recoveredLocal[unit] = published[unit]; recoveredRemote[unit] = published[unit]; }
+    }
+    baseLocal = recoveredLocal; baseRemote = recoveredRemote;
     NSDictionary *choices = readJSON([self.directory stringByAppendingPathComponent:@"choices.json"]);
     NSMutableSet *names = [NSMutableSet setWithArray:local.allKeys]; [names addObjectsFromArray:remote.allKeys];
     NSMutableDictionary *chosen = [remote mutableCopy], *conflicts = [NSMutableDictionary dictionary]; BOOL needsRestart = NO;
@@ -214,12 +226,23 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
         NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version":@1, @"units":chosen} options:NSJSONWritingSortedKeys error:nil];
         DMDAVRequest *history = [self request:@"PUT" path:[@"history/" stringByAppendingFormat:@"%@.json", NSUUID.UUID.UUIDString] data:data condition:@"If-None-Match" value:@"*" error:error]; if (!history) return NO;
         if (history.response.statusCode != 201) return fail(error, DMWebDAVHTTP);
+        NSMutableDictionary *outbound = [NSMutableDictionary dictionary];
+        for (NSString *unit in chosen) if (!equal(chosen[unit], remote[unit])) outbound[unit] = chosen[unit];
+        if (!writeJSON(outbound, publishing)) return fail(error, DMWebDAVLocal);
         DMDAVRequest *put = [self request:@"PUT" path:@"index.json" data:data condition:absent ? @"If-None-Match" : @"If-Match" value:absent ? @"*" : etag error:error]; if (!put) return NO;
-        if (put.response.statusCode == 412) return fail(error, DMWebDAVConflict);
+        if (put.response.statusCode == 412) { [fm removeItemAtPath:publishing error:nil]; return fail(error, DMWebDAVConflict); }
         if (put.response.statusCode != 200 && put.response.statusCode != 201 && put.response.statusCode != 204) return fail(error, DMWebDAVHTTP);
     }
-    if (download) for (NSString *unit in chosen) if (dm_cloud_pack_apply(save.fileSystemRepresentation, backup.fileSystemRepresentation, unit.UTF8String, [paths[chosen[unit]] fileSystemRepresentation])) return fail(error, DMWebDAVLocal);
+    if (download) for (NSString *unit in chosen) {
+        NSString *source = paths[chosen[unit]];
+        if (dm_cloud_pack_apply(save.fileSystemRepresentation, backup.fileSystemRepresentation, unit.UTF8String, source.fileSystemRepresentation)) return fail(error, DMWebDAVLocal);
+        // 导入成功后同步镜像，包含墓碑；否则后续导出会把旧镜像误判为本机新修改。
+        // Mirror every successful import, including tombstones, so later exports cannot mistake stale packs for local edits.
+        NSData *pack = [NSData dataWithContentsOfFile:source];
+        if (!pack || ![pack writeToFile:[export stringByAppendingPathComponent:[unit stringByAppendingString:@".pack"]] options:NSDataWritingAtomic error:error]) return fail(error, DMWebDAVLocal);
+    }
     if (!writeJSON(@{@"local":chosen, @"remote":chosen}, checkpoint)) return fail(error, DMWebDAVLocal);
+    [fm removeItemAtPath:publishing error:nil];
     [fm removeItemAtPath:snapshot error:nil]; [fm removeItemAtPath:incoming error:nil]; [fm removeItemAtPath:[self.directory stringByAppendingPathComponent:@"choices.json"] error:nil]; return YES;
 }
 @end

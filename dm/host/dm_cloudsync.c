@@ -346,6 +346,40 @@ static int pack_owns_paths(const cs_unit *u, const char *unit) {
     }
     return u->tomb ? u->n == 0 : u->n > 0 && (!strcmp(unit, "_stash") || character);
 }
+// WebDAV 镜像只是本机快照，不参与 iCloud 的时间仲裁和共享仓库分叉规则。
+// A WebDAV mirror is only a local snapshot, independent of iCloud timestamp arbitration and stash fork rules.
+int dm_cloud_pack_export(const char *save, const char *mirror, unsigned long long now_ms) {
+    if (!save || !mirror) return -1;
+    char names[256][64]; int nn = 0; DIR *dp = opendir(save); struct dirent *e;
+    if (!dp) return -1;
+    while ((e = readdir(dp))) {
+        if (is_char_dir(save, e->d_name)) add_name(names, &nn, e->d_name);
+        else if (is_stash(e->d_name)) add_name(names, &nn, "_stash");
+    }
+    closedir(dp); dp = opendir(mirror); if (!dp) return -1;
+    while ((e = readdir(dp))) {
+        size_t n = strlen(e->d_name);
+        if (n > 5 && n - 5 < 64 && !strcmp(e->d_name + n - 5, ".pack")) {
+            char name[64]; memcpy(name, e->d_name, n - 5); name[n - 5] = 0; add_name(names, &nn, name);
+        }
+    }
+    closedir(dp);
+    for (int i = 0; i < nn; i++) {
+        cs_unit *local = calloc(1, sizeof *local), *old = calloc(1, sizeof *old); int result = -1;
+        if (local && old) {
+            char path[1300]; snprintf(path, sizeof path, "%s/%s.pack", mirror, names[i]);
+            int present = local_read(save, names[i], local), previous = pack_read(path, old);
+            if (present >= 0 && previous >= 0) {
+                if (present) result = pack_write(path, local);
+                else if (previous && !old->tomb) { cs_unit tomb = { .tomb = 1, .stamp = now_ms }; result = pack_write(path, &tomb); }
+                else result = 0;
+            }
+        }
+        if (local) { unit_free(local); free(local); } if (old) { unit_free(old); free(old); }
+        if (result) return -1;
+    }
+    return 0;
+}
 int dm_cloud_pack_validate(const char *pack, const char *unit) {
     cs_unit *u = calloc(1, sizeof *u); if (!u) return 0;
     int ok = pack_read(pack, u) == 1 && pack_owns_paths(u, unit); unit_free(u); free(u); return ok;

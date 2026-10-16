@@ -46,7 +46,9 @@ http.createServer((req, res) => {
         if (req.headers['if-none-match'] === '*' && exists) return send(412);
         if (req.headers['if-match'] && (!exists || req.headers['if-match'] !== hash(blobs.get(path)))) return send(412);
       }
-      blobs.set(path, data); return send(exists ? 204 : 201);
+      blobs.set(path, data);
+      if (fault === 'lost-index-response' && path.endsWith('/index.json')) return setTimeout(() => send(exists ? 204 : 201), 6500);
+      return send(exists ? 204 : 201);
     }
     if (req.method === 'DELETE') { blobs.delete(path); return send(204); }
     return send(501);

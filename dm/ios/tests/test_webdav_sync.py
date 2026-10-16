@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -51,8 +52,8 @@ class WebDAVSync(unittest.TestCase):
         try:
             cls.server.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(cls.server.pid, signal.SIGKILL)
-            cls.server.wait()
+            os.killpg(cls.server.pid, signal.SIGTERM)
+            cls.server.wait(timeout=5)
         cls.log.close()
         if os.environ.get('DM_WEBDAV_TEST_ARTIFACTS'):
             output = Path(os.environ['DM_WEBDAV_TEST_ARTIFACTS'])
@@ -157,6 +158,39 @@ class WebDAVSync(unittest.TestCase):
         self.assertFalse((self.device('b') / 'Alice').exists())
         self.assertTrue(list((self.case / 'b/work/backups').rglob('Alice.d2s')))
 
+    def test_downloaded_deletion_stays_deleted_across_restarts(self):
+        self.baseline()
+        shutil.rmtree(self.device('a') / 'Alice')
+        self.assertTrue(self.sync('a', down=False)['ok'])
+        for device in ('b', 'fresh'):
+            for _ in range(3):
+                self.assertTrue(self.sync(device)['ok'])
+                self.assertFalse((self.device(device) / 'Alice').exists())
+                self.put(device, 'unrelated progress', name='Bob')
+                self.assertTrue(self.sync(device, down=False)['ok'])
+
+    def test_offline_deletion_survives_next_startup(self):
+        self.baseline()
+        shutil.rmtree(self.device('a') / 'Alice')
+        self.control(fault='server')
+        self.assertFalse(self.sync('a', down=False)['ok'])
+        self.control(fault='')
+        self.assertTrue(self.sync('a')['ok'])
+        self.assertFalse((self.device('a') / 'Alice').exists())
+        self.assertTrue(self.sync('b')['ok'])
+        self.assertFalse((self.device('b') / 'Alice').exists())
+
+    def test_lost_publish_response_does_not_conflict_with_later_local_progress(self):
+        self.baseline()
+        self.put('a', 'first update')
+        self.control(fault='lost-index-response')
+        self.assertEqual(self.sync('a', down=False)['code'], 2)
+        self.control(fault='')
+        self.put('a', 'second update')
+        self.assertTrue(self.sync('a', down=False)['ok'])
+        self.assertTrue(self.sync('b')['ok'])
+        self.assertEqual(self.contents('b'), 'second update')
+
     def test_shared_stash_conflict_is_not_automatically_merged(self):
         relative = 'ModernSharedStashSoftCoreV2/ModernSharedStashSoftCoreV2.d2i'
         def put_stash(device, text):
@@ -177,6 +211,40 @@ class WebDAVSync(unittest.TestCase):
         self.assertEqual((self.device('b') / relative).read_text(), 'local stash edit')
         self.assertTrue(self.sync('b', choice=('_stash', False))['ok'])
         self.assertEqual((self.device('b') / relative).read_text(), 'server stash edit')
+        for down in (False, True, False):
+            self.assertTrue(self.sync('b', down=down)['ok'])
+            self.assertEqual((self.device('b') / relative).read_text(), 'server stash edit')
+
+    def test_structured_stash_choice_and_later_shrink_are_exact(self):
+        relative = 'ModernSharedStashSoftCoreV2/ModernSharedStashSoftCoreV2.d2i'
+        def data(count):
+            size = 148 + 10 * count
+            out = bytearray(size)
+            out[:4] = bytes.fromhex('55aa55aa')
+            struct.pack_into('<I', out, 16, size)
+            out[64:68] = bytes.fromhex('c0edeac0')
+            struct.pack_into('<HH', out, 68, 1, count)
+            for i in range(count):
+                struct.pack_into('<IHI', out, 84 + 10 * i, i + 1, 0, 1)
+            return bytes(out)
+        def put(device, count):
+            path = self.device(device) / relative
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(data(count))
+        put('a', 2)
+        self.assertTrue(self.sync('a')['ok'])
+        self.assertTrue(self.sync('b')['ok'])
+        put('a', 3)
+        put('b', 5)
+        self.assertTrue(self.sync('a', down=False)['ok'])
+        self.assertTrue(self.sync('b', choice=('_stash', False))['ok'])
+        for down in (False, True):
+            self.assertTrue(self.sync('b', down=down)['ok'])
+            self.assertEqual((self.device('b') / relative).read_bytes(), data(3))
+        put('b', 1)
+        self.assertTrue(self.sync('b', down=False)['ok'])
+        self.assertTrue(self.sync('a')['ok'])
+        self.assertEqual((self.device('a') / relative).read_bytes(), data(1))
 
     def test_failed_index_cas_does_not_advance_checkpoint(self):
         self.baseline()
