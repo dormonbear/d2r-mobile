@@ -8,6 +8,8 @@
 #include "dm_actions.h"
 #include "dm_cursor_item.h"
 #include "dm_i18n.h"
+#include "dm_save_reload.h"
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3085,7 +3087,41 @@ static void rs_pump(void) {   // 取手柄处（游戏主线程）每次调 | ca
 // The key script's "send UI message" step (hle_hid.c MSG:...): registered from any thread, sent where the controller is fetched (game main thread). Single slot, one message per script step
 static char g_sendq[96]; static _Atomic int g_sendq_on;
 void dm_ui_send_queue(const char *spec) { strlcpy(g_sendq, spec, sizeof g_sendq); atomic_store(&g_sendq_on, 1); }
+static _Atomic int g_save_reload;
+static dm_save_sync_worker g_save_reload_worker;
+static dm_save_sync_done g_save_reload_done;
+static void *g_save_reload_context;
+int dm_save_reload_request(dm_save_sync_worker worker, dm_save_sync_done done, void *context) {
+    int idle = 0;
+    if (!atomic_compare_exchange_strong(&g_save_reload, &idle, -1)) return 0;
+    g_save_reload_worker = worker; g_save_reload_done = done; g_save_reload_context = context;
+    atomic_store(&g_save_reload, 1); return 1;
+}
+static void save_reload_pump(void) {
+    int requested = 1;
+    if (!atomic_compare_exchange_strong(&g_save_reload, &requested, 2)) return;
+    module_t *m = main_module();
+    int err = EBUSY;
+    if (m && atomic_load(&g_fe_ribbon) && !atomic_load(&g_load_up) && !dm_restart_busy()) {
+        // Original save manager: drain pending reads/writes before taking the
+        // isolated snapshot. Rebuild offline characters from Settings afterwards
+        // (3.3.94012: original frontend calls 7f9fe0 at 8106dc).
+        uint8_t *b = (uint8_t *)m->base;
+        void *manager = ((void *(*)(void))(b + 0xe016c0))();
+        ((void (*)(void *, int))(b + 0xdff67c))(manager, 1);
+        err = dm_fs_sync_save(g_save_reload_worker, g_save_reload_context);
+        if (!err) {
+            ((void (*)(void))(b + 0x7f9fe0))();
+            fe_send("CharacterSelect", "ReloadCharacters", "");
+            fe_send("MainMenuHD", "UpdateCharacterInfo", "");
+        }
+    }
+    dm_save_sync_done done = g_save_reload_done; void *context = g_save_reload_context;
+    done(err, context);
+    atomic_store(&g_save_reload, 0);
+}
 void dm_ui_frontend_pump(void) {   // 取手柄处调；各动作之间隔开几帧 | called where the controller is fetched; actions are spaced a few frames apart
+    save_reload_pump();
     if (atomic_exchange(&g_sendq_on, 0)) { char b[96], *c1, *c2; strlcpy(b, g_sendq, sizeof b); c1 = strchr(b, ':'); if (c1) { *c1++ = 0; c2 = strchr(c1, ':'); if (c2) *c2++ = 0; fe_send(b, c1, c2 ? c2 : ""); } }
     // 诊断：DM_DBG_FE_SEND="帧:类别:动作:参数;…"（帧号从 DM_UI_TAPS_AT 命中起算）到帧直接往界面根控件发一条界面消息，探「某条消息此刻收不收」用
     // Diagnostics: DM_DBG_FE_SEND="frame:category:action:argument;..." (frame numbers count from the DM_UI_TAPS_AT hit) sends a UI message directly to the UI root widget at the frame, to probe "whether a given message is accepted right now"

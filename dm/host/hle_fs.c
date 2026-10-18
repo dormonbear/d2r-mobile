@@ -12,6 +12,7 @@
 // Struct layout follows the public Horizon ABI: DirectoryEntry = {char name[0x301], pad[3], s8 type, pad[3], s64 size} (0x310 bytes).
 #include "hle.h"
 #include "front.h"
+#include "dm_save_reload.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -404,6 +405,42 @@ const char *dm_save_workdir(void) { for (int i = 0; i < g_nmnt; i++) if (g_mnt[i
 // 事务式存档的已提交目录（盘上那份，上次 Commit 的版本）。没挂载存档时返回 NULL
 // The committed directory of the transactional save (the copy on disk, the version from the last Commit). Returns NULL when no save is mounted
 const char *dm_save_commitdir(void) { for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].commit[0]) return g_mnt[i].commit; return NULL; }
+
+// The frontend pump stops the guest main thread while this runs. Keep filesystem
+// operations out too: no late save may overwrite a downloaded version. Network
+// work touches only the isolated copy and never calls the guest filesystem.
+int dm_fs_sync_save(dm_save_sync_worker worker, void *context) {
+    PATH_LOCK(); pthread_mutex_lock(&g_lock);
+    int err = EBUSY, i;
+    char stage[1100] = "", next[1100] = "";
+    for (i = 0; i < g_nmnt && !g_mnt[i].commit[0]; i++) {}
+    if (i == g_nmnt || atomic_load(&g_save_poison) || atomic_load(&g_txn_first_ns)) goto out;
+    for (unsigned fd = 0; fd < sizeof g_fsave; fd++) if (g_fsave[fd]) goto out;
+    snprintf(stage, sizeof stage, "%s.sync", g_mnt[i].commit);
+    snprintf(next, sizeof next, "%s.sync-work", g_mnt[i].commit);
+    rm_tree(stage); rm_tree(next);
+    if (clonefile(g_mnt[i].dir, stage, 0)) { err = errno; goto out; }
+    err = worker(stage, context);
+    if (err) goto out;
+    if (dm_fs_test_fail("syncclone") || clonefile(stage, next, 0)) { err = errno; goto out; }
+    // Publish to disk first. If switching the mounted working copy fails, undo
+    // the disk switch before releasing the lock. The old trees are still here.
+    if (renamex_np(stage, g_mnt[i].commit, RENAME_SWAP)) { err = errno; goto out; }
+    if (dm_fs_test_fail("syncswap") || renamex_np(next, g_mnt[i].dir, RENAME_SWAP)) {
+        err = errno;
+        if (renamex_np(stage, g_mnt[i].commit, RENAME_SWAP)) {
+            // Preserve both versions for recovery and refuse further commits.
+            save_poison(errno); stage[0] = 0;
+        }
+        goto out;
+    }
+    err = 0;
+out:
+    if (stage[0]) rm_tree(stage);
+    if (next[0]) rm_tree(next);
+    pthread_mutex_unlock(&g_lock);
+    return err;
+}
 void (*g_dm_mount_seed_hook)(const char *save_dir);   // 挂存档前调（存档目录）：往存档里补宿主要的文件 | called before mounting the save (save dir): adds the files the host needs to the save
 HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 → 宿主目录（单用户）", Result, h_fs_MountSave, const char *name, const void *uid) {
     (void)uid;

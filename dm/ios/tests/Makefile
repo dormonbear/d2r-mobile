@@ -17,6 +17,7 @@ run: test
 # 真实 HTTP 集成测试需要本机 Postman CLI，不依赖游戏文件。
 # Real-HTTP integration tests require the local Postman CLI, without game files.
 test-webdav:
+	python3 test_webdav_conflicts.py
 	python3 test_webdav_sync.py
 $(TARGET): t_touch_controls.c $(wildcard ../Sources/dm_touch_controls.[ch]) ../../host/dm_input.h
 	$(CC) $(CFLAGS) -I../Sources t_touch_controls.c ../Sources/dm_touch_controls.c -lm -o $@

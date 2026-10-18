@@ -4,6 +4,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #include "dm_cloudpack.h"
 #include <stdint.h>
+#include <sys/clonefile.h>
+#include <stdio.h>
 static const NSUInteger limitBytes = 64u << 20;
 static NSError *failure(DMWebDAVError code) { return [NSError errorWithDomain:@"D2RWebDAV" code:code userInfo:nil]; }
 static BOOL fail(NSError **error, DMWebDAVError code) { if (error) *error = failure(code); return NO; }
@@ -58,6 +60,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
 @property(nonatomic) NSDate *deadline;
 @property(nonatomic) DMDAVRequest *http;
 @property(nonatomic) NSString *lockToken;
+@property(nonatomic) NSString *originalDirectory;
 @property(nonatomic, readwrite) NSDictionary<NSString *, NSDictionary *> *conflicts;
 @property(nonatomic, readwrite) NSDictionary *diagnostics;
 @end
@@ -198,12 +201,46 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     NSMutableDictionary *choices = [readJSON(file) mutableCopy]; NSMutableDictionary *choice = [conflict mutableCopy]; choice[@"useLocal"] = @(local); choices[unit] = choice;
     return writeJSON(choices, file) ? YES : fail(error, DMWebDAVLocal);
 }
+- (NSDictionary<NSString *, NSDictionary *> *)unresolvedChoices {
+    NSDictionary *choices = readJSON([self.directory stringByAppendingPathComponent:@"choices.json"]);
+    NSMutableDictionary *unresolved = [NSMutableDictionary dictionary];
+    for (NSString *unit in self.conflicts) {
+        NSDictionary *version = self.conflicts[unit], *choice = choices[unit];
+        if (![choice isKindOfClass:NSDictionary.class] || !equal(choice[@"local"], version[@"local"]) || !equal(choice[@"remote"], version[@"remote"])) unresolved[unit] = version;
+    }
+    return unresolved;
+}
+- (BOOL)choicesReady { return !self.unresolvedChoices.count; }
+- (BOOL)beginReload:(NSError **)error {
+    if (self.originalDirectory) return fail(error, DMWebDAVLocal);
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (![fm createDirectoryAtPath:self.directory withIntermediateDirectories:YES attributes:nil error:error]) return NO;
+    NSString *staged = [self.directory stringByAppendingFormat:@".reload-%@", NSUUID.UUID.UUIDString];
+    if (clonefile(self.directory.fileSystemRepresentation, staged.fileSystemRepresentation, 0)) return fail(error, DMWebDAVLocal);
+    self.originalDirectory = self.directory; self.directory = staged;
+    return YES;
+}
+- (BOOL)finishReload:(BOOL)installed error:(NSError **)error {
+    if (!self.originalDirectory) return YES;
+    NSString *staged = self.directory, *original = self.originalDirectory;
+    self.directory = original; self.originalDirectory = nil;
+    if (installed && renamex_np(staged.fileSystemRepresentation, original.fileSystemRepresentation, RENAME_SWAP)) {
+        // The saves are already installed. Preserve the provisional directory,
+        // including its backups, if publishing sync bookkeeping fails.
+        return fail(error, DMWebDAVLocal);
+    }
+    [NSFileManager.defaultManager removeItemAtPath:staged error:nil];
+    return YES;
+}
 - (BOOL)syncSave:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
     @try { return [self performSync:save allowDownload:download error:error]; }
     @finally { [self finish]; }
 }
 - (BOOL)performSync:(NSString *)save allowDownload:(BOOL)download error:(NSError **)error {
-    self.diagnostics = @{}; self.deadline = [NSDate dateWithTimeIntervalSinceNow:20]; self.conflicts = @{};
+    if (self.progress) self.progress(DMWebDAVPreparing);
+    // 请求失败不代表旧冲突已经消失；只有读到并比较新版本后才替换冲突快照。
+    // A failed request does not resolve a known conflict; replace the snapshot only after comparing fresh versions.
+    self.diagnostics = @{}; self.deadline = [NSDate dateWithTimeIntervalSinceNow:20];
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *snapshot = [self.directory stringByAppendingPathComponent:@"snapshot"], *export = [self.directory stringByAppendingPathComponent:@"export"];
     if (download && ![fm fileExistsAtPath:save] && ![fm createDirectoryAtPath:save withIntermediateDirectories:YES attributes:nil error:error]) return NO;
@@ -216,7 +253,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     [fm removeItemAtPath:snapshot error:nil];
     if (![fm copyItemAtPath:save toPath:snapshot error:error] || ![fm createDirectoryAtPath:export withIntermediateDirectories:YES attributes:nil error:error]) return NO;
     NSString *backup = [self.directory stringByAppendingPathComponent:@"backups"];
-    if (dm_cloud_pack_export(snapshot.fileSystemRepresentation, export.fileSystemRepresentation, !download, (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000)) < 0) return fail(error, DMWebDAVLocal);
+    if (dm_cloud_pack_export(snapshot.fileSystemRepresentation, export.fileSystemRepresentation, !download || self.originalDirectory != nil, (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000)) < 0) return fail(error, DMWebDAVLocal);
     NSMutableDictionary *local = [NSMutableDictionary dictionary]; NSMutableDictionary *paths = [NSMutableDictionary dictionary]; NSUInteger total = 0;
     for (NSString *file in [fm contentsOfDirectoryAtPath:export error:nil]) {
         if (![file hasSuffix:@".pack"]) continue; NSString *unit = file.stringByDeletingPathExtension, *path = [export stringByAppendingPathComponent:file];
@@ -227,6 +264,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     }
     // 运行时提交才生成删除标记；启动发现缺档时保留镜像，从服务器恢复，避免意外清空传播。
     // Only runtime commits create tombstones; missing saves at startup retain the mirror for recovery instead of propagating an accidental wipe.
+    if (self.progress) self.progress(DMWebDAVChecking);
     if (![self prepare:error] || ![self coordinate:error]) return NO;
     DMDAVRequest *head = [self request:@"GET" path:@"index.json" data:nil condition:nil value:nil error:error]; if (!head) return NO;
     NSDictionary *remote = @{}; BOOL absent = head.response.statusCode == 404;
@@ -272,6 +310,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
     // 先完整下载、校验所有包，之后才发布索引及替换本地；坏包不能造成部分导入。
     // Download and validate every pack before publishing the index or replacing local data; corrupt packs cannot cause a partial import.
     NSString *incoming = [self.directory stringByAppendingPathComponent:@"incoming"];
+    if (self.progress) self.progress(DMWebDAVDownloading);
     [fm removeItemAtPath:incoming error:nil]; if (![fm createDirectoryAtPath:incoming withIntermediateDirectories:YES attributes:nil error:error]) return NO;
     for (NSString *unit in chosen) {
         NSString *hash = chosen[unit]; if (!paths[hash]) {
@@ -283,6 +322,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
             paths[hash] = path;
         }
     }
+    if (self.progress) self.progress(DMWebDAVUploading);
     for (NSString *unit in chosen) {
         NSString *hash = chosen[unit]; if (equal(remote[unit], hash)) continue;
         NSData *data = [NSData dataWithContentsOfFile:paths[hash]];
@@ -303,6 +343,7 @@ static BOOL writeJSON(NSDictionary *obj, NSString *path) {
         if (put.response.statusCode == 412 || put.response.statusCode == 423) { [fm removeItemAtPath:publishing error:nil]; return fail(error, DMWebDAVConflict); }
         if (put.response.statusCode != 200 && put.response.statusCode != 201 && put.response.statusCode != 204) return fail(error, DMWebDAVHTTP);
     }
+    if (self.progress) self.progress(DMWebDAVApplying);
     if (download) for (NSString *unit in chosen) {
         NSString *source = paths[chosen[unit]];
         if (dm_cloud_pack_apply(save.fileSystemRepresentation, backup.fileSystemRepresentation, unit.UTF8String, source.fileSystemRepresentation)) return fail(error, DMWebDAVLocal);

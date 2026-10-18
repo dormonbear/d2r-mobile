@@ -38,6 +38,13 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off) {
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  ✗ "); } else printf("  ✓ "); printf(__VA_ARGS__); printf("\n"); } while (0)
 static void put(const char *p, const char *s) { FILE *f = fopen(p, "w"); fputs(s, f); fclose(f); }
+static int sync_calls;
+static int sync_copy(const char *save, void *failure) {
+    char p[1200]; snprintf(p, sizeof p, "%s/a", save); put(p, "downloaded");
+    snprintf(p, sizeof p, "%s/b", save); unlink(p);
+    sync_calls++;
+    return failure ? EIO : 0;
+}
 static int same(const char *p, const char *s) {
     char b[64] = {0}; FILE *f = fopen(p, "r"); if (!f) return 0; size_t k = fread(b, 1, sizeof b - 1, f); fclose(f);
     return k == strlen(s) && !memcmp(b, s, k);
@@ -194,6 +201,36 @@ int main(void) {
       LANGCASE(1, "{ \"Language\": 0, \"VoiceLanguage\": 8 }", "{ \"Language\": 0, \"VoiceLanguage\": 0 }", "开关 = 英文、文字已英文但语音还是中文：语音跟上");
       LANGCASE(1, "{ \"Language\": 12 }", "{\n    \"VoiceLanguage\": 0, \"Language\": 0 }", "开关 = 英文、两位数的语言号且没有语音键：改写并补上语音键");
       g_t_lang = -1; }
+
+    printf("⑧ 同步副本与挂载一起切换，失败保留两份原目录\n");
+    unsetenv("DM_TEST_FS_FAILAT");
+    atomic_store(&g_txn_first_ns, 0);
+    CHECK(dm_fs_sync_save(sync_copy, (void *)1) == EIO, "同步失败不发布临时副本");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "失败时已提交版不变");
+    snprintf(p, sizeof p, "%s/a", work); CHECK(same(p, "ok3"), "失败时游戏工作目录不变");
+    setenv("DM_TEST_FS_FAILAT", "syncclone:1", 1);
+    CHECK(dm_fs_sync_save(sync_copy, NULL) == ENOSPC, "无法克隆新工作目录时不切换");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "克隆失败时已提交版不变");
+    setenv("DM_TEST_FS_FAILAT", "syncswap:1", 1);
+    CHECK(dm_fs_sync_save(sync_copy, NULL) == ENOSPC, "切换工作目录失败时回滚磁盘存档");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "切换失败时磁盘存档已回滚");
+    snprintf(p, sizeof p, "%s/a", work); CHECK(same(p, "ok3"), "切换失败时工作目录不变");
+    unsetenv("DM_TEST_FS_FAILAT");
+    uint64_t opened = 0;
+    CHECK(h_fs_OpenFile(&opened, "save:/a", MODE_READ) == RES_OK, "持有打开的存档句柄");
+    int calls_before = sync_calls;
+    CHECK(dm_fs_sync_save(sync_copy, NULL) == EBUSY && sync_calls == calls_before, "有存档句柄时不运行同步");
+    h_fs_CloseFile(opened);
+    atomic_store(&g_txn_first_ns, 1);
+    CHECK(dm_fs_sync_save(sync_copy, NULL) == EBUSY && sync_calls == calls_before, "有未提交写入时不运行同步");
+    atomic_store(&g_txn_first_ns, 0);
+    CHECK(dm_fs_sync_save(sync_copy, NULL) == 0, "同步成功并替换两个目录");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "downloaded"), "已提交版使用下载的存档");
+    snprintf(p, sizeof p, "%s/a", work); CHECK(same(p, "downloaded"), "游戏工作目录使用同一份下载存档");
+    snprintf(p, sizeof p, "%s/b", work); CHECK(access(p, F_OK) != 0, "同步的删除也应用到工作目录");
+    CHECK(h_fs_Commit("save") == RES_OK, "重新提交不会复活旧存档");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "downloaded"), "重新提交后仍是下载的版本");
+    snprintf(p, sizeof p, "%s/b", save); CHECK(access(p, F_OK) != 0, "重新提交后被删文件仍不存在");
 
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d 项，失败 %d ==\n", checks, fails);
