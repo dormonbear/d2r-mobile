@@ -405,4 +405,9 @@ static const struct { const char *k, *zh, *en; } k_dm_i18n[] = {
     { "dmDAVShareLog", "分享诊断日志", "Share Diagnostics" },
     { "dmDAVLocalNetwork", "连接你的 WebDAV 服务器以同步存档。", "Connect to your WebDAV server to sync saves." },
     { "dmDAVDisabled", "WebDAV 同步未启用", "WebDAV sync is disabled" },
+    { "dmCustomTouchSwapAbove", "换组键位置", "Skill-set switch position" },
+    { "dmCustomTouchSwapNear", "换组键：传送门左侧", "Skill-set switch: left of portal" },
+    { "dmCustomTouchSwapNearHint", "沿传送门外侧弧线排布，松手后切换", "On the portal arc; release to switch" },
+    { "dmCustomTouchSwapFar", "换组键：技能区上方", "Skill-set switch: above skills" },
+    { "dmCustomTouchSwapFarHint", "位于技能区左上，松手后切换", "Above-left of skills; release to switch" },
 };
